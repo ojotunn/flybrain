@@ -285,7 +285,7 @@ pedaços novos:
   perde quadro, não acumula. O relay devolve `{"viewers": n}` e o número entra no campo `viewers` dos quadros.
   Sem `/dev`, sem estímulo pelo público. `/health` mostra se a fonte está ligada.
 - **Domínio (07/09): `flybrain.finance`** (Michel comprou; ele escreveu "flybrian" no chat, conferir a grafia no
-  registrador). O `.bat` já aponta `FLY_RELAY_URL=wss://flybrain.finance/fonte` e lê o token de `relay.token`
+  registrador). O `.bat` aponta `FLY_RELAY_URL=wss://flybrain-production.up.railway.app/fonte` (o PC entra pelo endereço do Railway, que não depende do DNS do domínio) e lê o token de `relay.token`
   (arquivo na raiz, fora do git, gerado com `secrets.token_urlsafe(36)`). Os meta tags de compartilhamento
   (og:*, twitter:*), o canonical e a imagem `site/og.png` (`brain/gerar_og.py`: nuvem real dos neurônios + marca,
   1200×630) usam esse domínio; se o domínio for outro, trocar nos meta tags de `publico.html`, no `gerar_og.py`

@@ -7,7 +7,8 @@ rem Corpo: pose (a mosca e desenhada no navegador; leve p/ internet), jpeg (rend
 set FLY_CORPO_SAIDA=pose
 rem Site publico: relay no Railway (relay/servidor.py) em flybrain.finance. O token fica em relay.token (fora do git);
 rem o MESMO valor vai na variavel FLY_RELAY_TOKEN do servico no Railway.
-set FLY_RELAY_URL=wss://flybrain.finance/fonte
+rem (o PC entra pelo endereco do Railway, que nao depende do DNS do dominio; flybrain.finance e so para quem assiste)
+set FLY_RELAY_URL=wss://flybrain-production.up.railway.app/fonte
 if exist relay.token set /p FLY_RELAY_TOKEN=<relay.token
 rem Mercado: modo real (carteira dela em mercado\carteira.json) ou papel. Em DOLAR: teto por ordem e lote (fracao do saldo).
 set FLY_MERCADO_MODO=real
