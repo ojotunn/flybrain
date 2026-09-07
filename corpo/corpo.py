@@ -31,6 +31,7 @@ from flygym.examples.locomotion.turning_controller import HybridTurningControlle
 import sys as _sys                       # noqa: E402
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import aparencia                         # noqa: E402  cores de mosca real e pisos
+import corpo3d_envio                     # noqa: E402  quadro de pose (angulos) para a mosca desenhada no navegador
 
 SERVIDOR = os.environ.get('FLY_SERVIDOR', 'http://localhost:8435')
 PISO = os.environ.get('FLY_CORPO_PISO', 'preto')            # preto | ardosia | bancada | madeira | banana | musgo | xadrez
@@ -62,6 +63,10 @@ PASSADA_MM = 1.17
 GIRO_RAD_S = 1.5                                               # 2,5 virava a mosca em 115 graus em 10 s com assimetria pequena
 CPG_DT = 1e-3                                                  # sub-passo do gerador de marcha no modo cinematico
 ESCALA_TEMPO = float(os.environ.get('FLY_CORPO_TEMPO', '1.0'))  # 1 = tempo real; 0,5 = metade da velocidade
+# Saida (07/09): 'pose' manda so os angulos (qpos) e a camera, ~400 B a POSE_FPS; o navegador desenha a mosca
+# (site/fly-cliente.js + modelo de corpo/exportar_modelo.py). 'jpeg' e o render local de antes; 'ambos' os dois.
+SAIDA = os.environ.get('FLY_CORPO_SAIDA', 'pose')
+POSE_FPS = int(os.environ.get('FLY_CORPO_POSE_FPS', '30'))
 # Voo (cinematico): a fuga (fibra gigante) vira decolagem, como na mosca real; pousa quando a fibra silencia.
 # Batida real e ~200 Hz e viraria borrao; na tela fica estilizada (ASA_HZ), dito no rodape.
 ALT_VOO_MM = 5.0
@@ -194,9 +199,9 @@ def enviador(fila, estado):
                     estado.pop('erro_envio', None)
                     while True:
                         cab, quadro = await asyncio.get_running_loop().run_in_executor(None, fila.get)
-                        jpeg = comprimir(quadro)
+                        dados = quadro if isinstance(quadro, (bytes, bytearray)) else comprimir(quadro)
                         j = json.dumps(cab, separators=(',', ':')).encode('utf-8')
-                        await ws.send(struct.pack('<I', len(j)) + j + jpeg)
+                        await ws.send(struct.pack('<I', len(j)) + j + dados)
                         estado['enviados'] = estado.get('enviados', 0) + 1
             except Exception as e:
                 estado['erro_envio'] = str(e)[:80]
@@ -594,7 +599,6 @@ def laco_cinematico(fly, cam, sim, decisor, estado, fila):
             alvo_rot = estado['rot'] + vel_rot * (time.time() - estado['rot_t'])
             dif = (alvo_rot - rot_local + np.pi) % (2 * np.pi) - np.pi
             rot_local += dif * 0.1
-        quadro = renderizar_orbita(sim, cam, (x, y, z + 0.6), yaw - rot_local)
         quadros += 1
         agora = time.time()
         rotulo = {'decolando': 'flying', 'voando': 'flying', 'pousando': 'landing'}.get(voo['estado'], modo)
@@ -605,7 +609,13 @@ def laco_cinematico(fly, cam, sim, decisor, estado, fila):
                'time_scale': round(escala, 2), 'step_hz': round(freq, 1), 'rot': round(rot_local % (2 * np.pi), 3),
                'excitement': round(excit, 2),
                'body_mode': 'kinematic', 'fps': round(quadros / max(1e-6, agora - t0), 1), 'frame': quadros}
-        enfileirar(fila, cab, quadro)
+        alvo, az = (x, y, z + 0.6), yaw - rot_local
+        if SAIDA in ('pose', 'ambos') and quadros % max(1, FPS // POSE_FPS) == 0:
+            cab_p, dados = corpo3d_envio.quadro_pose(d, cab, alvo, az, CAM_ELEV_RAD, CAM_DIST_MM)
+            cab_p['fps'] = POSE_FPS
+            enfileirar(fila, cab_p, dados)
+        if SAIDA in ('jpeg', 'ambos'):
+            enfileirar(fila, cab, renderizar_orbita(sim, cam, alvo, az))
 
         t += dt
         prox += dt_tela
@@ -686,8 +696,8 @@ def main():
     threading.Thread(target=enviador, args=(fila, estado), name='envio', daemon=True).start()
     cinematico = MODO_CORPO != 'fisica'
     fly, cam, sim = montar(FPS if cinematico else 30, 1.0 if cinematico else PLAY_SPEED)
-    print(f'[corpo] mosca pronta; modo {"cinematico" if cinematico else "fisica"}; render {LARGURA}x{ALTURA}; '
-          f'servidor {SERVIDOR}', flush=True)
+    print(f'[corpo] mosca pronta; modo {"cinematico" if cinematico else "fisica"}; saida {SAIDA} '
+          f'({POSE_FPS} poses/s; jpeg {LARGURA}x{ALTURA}); servidor {SERVIDOR}', flush=True)
     decisor = Decisor(estado)
     if cinematico:
         laco_cinematico(fly, cam, sim, decisor, estado, fila)

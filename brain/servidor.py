@@ -15,8 +15,11 @@ from aiohttp import web
 RAIZ = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from motor import Cerebro, ESTIMULOS_BLOQUEADOS  # noqa: E402
+from relay_cliente import Uplink                 # noqa: E402
 
 PORTA = int(os.environ.get('FLY_PORT', '8435'))
+RELAY_URL = os.environ.get('FLY_RELAY_URL', '')            # ex.: wss://fly.up.railway.app/fonte (relay/servidor.py)
+RELAY_TOKEN = os.environ.get('FLY_RELAY_TOKEN', '')
 AMBIENTE_HZ = float(os.environ.get('FLY_AMBIENTE_HZ', '0'))   # 0: ruido difuso prende a rede em crise
 PLASTICIDADE = os.environ.get('FLY_PLASTICIDADE', '1') != '0'
 MAX_IDX = int(os.environ.get('FLY_MAX_IDX', '4000'))   # teto de indices por quadro enviado
@@ -25,9 +28,46 @@ SITE = RAIZ / 'site'
 DADOS = RAIZ / 'brain' / 'data'
 
 
+def delta_varint(idx):
+    """Indices ordenados, diferenca para o anterior em varint de 7 bits: ~1 byte por neuronio em vez de 4."""
+    d = np.diff(np.concatenate([[0], np.sort(np.asarray(idx, dtype=np.int64))]))
+    saida = np.empty((len(d), 3), dtype=np.uint8)
+    saida[:, 0] = (d & 0x7F) | np.where(d >= 128, 0x80, 0)
+    saida[:, 1] = ((d >> 7) & 0x7F) | np.where(d >= 16384, 0x80, 0)
+    saida[:, 2] = (d >> 14) & 0x7F
+    mascara = np.stack([np.ones(len(d), dtype=bool), d >= 128, d >= 16384], axis=1)
+    return saida[mascara].tobytes()
+
+
 def empacotar(cab, idx):
+    cab['enc'] = 'dv'
     j = json.dumps(cab, separators=(',', ':')).encode('utf-8')
-    return struct.pack('<I', len(j)) + j + idx.astype('<u4').tobytes()
+    return struct.pack('<I', len(j)) + j + delta_varint(idx)
+
+
+def mensagem_ola(app):
+    cerebro = app['cerebro']
+    return {
+        'tipo': 'ola', 'n': cerebro.n, 'synapses': cerebro.n_sinapses, 'device': cerebro.device,
+        'stimuli': {k: {'rate': cerebro.stim_rate[k], 'neurons': int(len(v)),
+                        'description': cerebro.stim_desc[k]} for k, v in cerebro.stim_idx.items()
+                    if k not in ESTIMULOS_BLOQUEADOS},
+        'groups': list(cerebro.grupos), 'born': cerebro.nascimento,
+        'plasticity': cerebro.plasticidade, 'ambient_hz': cerebro.ambiente_hz,
+    }
+
+
+def snapshot(app):
+    """Estado atual para quem acaba de chegar (pagina local ou relay): resumo, ultimos eventos, ultimo corpo."""
+    itens = []
+    if app['estado'].get('mercado_resumo'):
+        itens.append(json.dumps(app['estado']['mercado_resumo'], separators=(',', ':')))
+    for ev in list(app['estado']['mercado_eventos'])[-12:]:
+        itens.append(json.dumps(ev, separators=(',', ':')))
+    if app['estado'].get('corpo'):
+        cab, dados = app['estado']['corpo']
+        itens.append(empacotar_bytes(cab, dados))
+    return itens
 
 
 async def transmitir(app):
@@ -64,7 +104,8 @@ async def transmitir(app):
             'regions': q['regioes'],
             'dn': {k: round(v, 1) for k, v in q['dn'].items()},
             'stimuli': q['ativos'],
-            'viewers': len(clientes),
+            'viewers': max(0, len(clientes) - len(app['sem_corpo'])) + (app['uplink'].viewers if app['uplink'] else 0),
+            'relay': bool(app['uplink'] and app['uplink'].ligado),
             'synapses_changed': q['sinapses_mudadas'],
             'idx_total': idx_total,
             'state': q['estado'],
@@ -76,9 +117,12 @@ async def transmitir(app):
         }
         ultimo_t = agora
         app['estado']['ultimo'] = cab
-        if not clientes:
+        uplink = app['uplink']
+        if not clientes and not (uplink and uplink.ligado):
             continue
         dados = empacotar(cab, idx)
+        if uplink:
+            uplink.push_bin('quadro', dados)
         mortos = []
         for ws in list(clientes):
             try:
@@ -97,22 +141,13 @@ async def ws_handler(request):
     if request.query.get('papel') in ('corpo', 'mercado'):   # processos que so leem taxas: sem quadros do corpo
         app['sem_corpo'].add(ws)
     cerebro = app['cerebro']
-    await ws.send_str(json.dumps({
-        'tipo': 'ola', 'n': cerebro.n, 'synapses': cerebro.n_sinapses, 'device': cerebro.device,
-        'stimuli': {k: {'rate': cerebro.stim_rate[k], 'neurons': int(len(v)),
-                        'description': cerebro.stim_desc[k]} for k, v in cerebro.stim_idx.items()
-                    if k not in ESTIMULOS_BLOQUEADOS},
-        'groups': list(cerebro.grupos), 'born': cerebro.nascimento,
-        'plasticity': cerebro.plasticidade, 'ambient_hz': cerebro.ambiente_hz,
-    }))
-    if app['estado'].get('corpo') and ws not in app['sem_corpo']:
-        cab, dados = app['estado']['corpo']
-        await ws.send_bytes(empacotar_bytes(cab, dados))
+    await ws.send_str(json.dumps(mensagem_ola(app)))
     if ws not in app['sem_corpo']:
-        if app['estado'].get('mercado_resumo'):
-            await ws.send_str(json.dumps(app['estado']['mercado_resumo'], separators=(',', ':')))
-        for ev in list(app['estado']['mercado_eventos'])[-12:]:
-            await ws.send_str(json.dumps(ev, separators=(',', ':')))
+        for item in snapshot(app):
+            if isinstance(item, (bytes, bytearray)):
+                await ws.send_bytes(item)
+            else:
+                await ws.send_str(item)
     try:
         async for msg in ws:
             if msg.type != web.WSMsgType.TEXT:
@@ -146,6 +181,8 @@ async def espalhar_corpo(app, cab, dados):
     app['estado']['corpo'] = (cab, dados)
     app['estado']['corpo_n'] = app['estado'].get('corpo_n', 0) + 1
     pacote = empacotar_bytes(cab, dados)
+    if app['uplink']:
+        app['uplink'].push_bin('corpo', pacote)
     for ws in list(app['clientes']):
         if ws in app['sem_corpo']:
             continue
@@ -224,6 +261,8 @@ async def api_mercado(request):
         else:
             app['estado']['mercado_eventos'].append(ev)
         pacote = json.dumps(ev, separators=(',', ':'))
+        if app['uplink']:
+            app['uplink'].push_txt(pacote)
         for ws in list(app['clientes']):
             if ws in app['sem_corpo']:
                 continue
@@ -250,10 +289,16 @@ async def dev(request):
 
 async def ao_iniciar(app):
     app['tarefa'] = asyncio.create_task(transmitir(app))
+    if RELAY_URL:
+        app['uplink'] = Uplink(RELAY_URL, RELAY_TOKEN, lambda: mensagem_ola(app), lambda: snapshot(app))
+        app['tarefa_relay'] = asyncio.create_task(app['uplink'].rodar())
+        print(f'[servidor] relay: {RELAY_URL}', flush=True)
 
 
 async def ao_encerrar(app):
     app['tarefa'].cancel()
+    if app.get('tarefa_relay'):
+        app['tarefa_relay'].cancel()
     app['cerebro'].parar()
     print('[servidor] cerebro salvo e parado')
 
@@ -281,6 +326,8 @@ def main():
     app['cerebro'] = cerebro
     app['clientes'] = set()
     app['sem_corpo'] = set()           # conexoes que nao recebem os quadros do corpo (o proprio corpo)
+    app['uplink'] = None               # ligacao com o relay publico (criada em ao_iniciar se FLY_RELAY_URL existir)
+    app['tarefa_relay'] = None
     from collections import deque
     app['estado'] = {'ultimo': None, 'corpo_cfg': {}, 't0': time.time(),   # dict mutavel (o app nao aceita chaves novas depois)
                      'mercado_resumo': None, 'mercado_eventos': deque(maxlen=200)}

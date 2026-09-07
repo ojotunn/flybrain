@@ -13,8 +13,8 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:14px/
 #brain{position:relative;overflow:hidden;cursor:grab}
 #brain.drag{cursor:grabbing}
 #body{border-top:1px solid var(--line);background:#07080b;position:relative;overflow:hidden}
-#body img{display:block;width:100%;height:100%;object-fit:contain;opacity:0;transition:opacity .4s}
-#body img.on{opacity:1}
+#body img,#body canvas{position:absolute;inset:0;display:block;width:100%;height:100%;object-fit:contain;opacity:0;transition:opacity .4s}
+#body img.on,#body canvas.on{opacity:1}
 #corpoHud{position:absolute;left:16px;bottom:12px;display:flex;gap:12px;align-items:baseline;font-size:12px;color:var(--muted);pointer-events:none}
 #corpoModo{font-size:15px;font-weight:700;letter-spacing:.12em;color:var(--accent)}
 #corpoModo.escape,#corpoModo.flying{color:#ff5e5e}
@@ -74,6 +74,7 @@ button:disabled{opacity:.4;cursor:default}
       <div id="hint">drag to rotate</div>
     </div>
     <div id="body">
+      <canvas id="corpoCv"></canvas>
       <img id="corpoImg" alt="">
       <div id="corpoHud"><span id="corpoModo"></span><span id="corpoInfo">body offline</span></div>
     </div>
@@ -99,6 +100,7 @@ button:disabled{opacity:.4;cursor:default}
   </aside>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/0.158.0/three.min.js"></script>
+<script src="/static/fly-cliente.js"></script>
 <script>
 // Tela do cerebro em 3D (three.js): nuvem dos 138 mil neuronios na posicao real dentro da casca do cerebro,
 // girando devagar; cada neuronio que dispara acende e apaga. O corpo 3D chega como quadros JPEG (tipo "corpo").
@@ -128,7 +130,7 @@ async function load(){
   let shell=null;
   try{ shell=await (await fetch('/static/shell.bin')).arrayBuffer(); }catch(e){}
   heat=new Float32Array(N); active=new Int32Array(N);
-  buildUI(); build3D(xyz, reg, shell); connect(); requestAnimationFrame(draw);
+  buildUI(); build3D(xyz, reg, shell); connect(); requestAnimationFrame(draw); Corpo3D.init($('corpoCv'));
 }
 
 function build3D(xyz, reg, shell){
@@ -215,7 +217,7 @@ function buildUI(){
 
 function draw(ts){
   const dt=lastT?Math.min(0.1,(ts-lastT)/1000):0.016; lastT=ts||0;
-  if(corpoT && performance.now()-corpoT>6000){ $('corpoImg').classList.remove('on'); $('corpoInfo').textContent='body offline'; $('corpoModo').textContent=''; corpoT=0; }
+  if(corpoT && performance.now()-corpoT>6000){ $('corpoImg').classList.remove('on'); $('corpoCv').classList.remove('on'); $('corpoInfo').textContent='body offline'; $('corpoModo').textContent=''; corpoT=0; }
   // calor decai; so os ativos sao tocados
   let k=0;
   for(let j=0;j<nActive;j++){ const i=active[j]; const h=heat[i]*DECAY; if(h<=MIN_HEAT){heat[i]=0; continue;} heat[i]=h; active[k++]=i; }
@@ -252,15 +254,21 @@ function onFrame(buf){
   const dv=new DataView(buf); const len=dv.getUint32(0,true);
   const j=JSON.parse(new TextDecoder().decode(new Uint8Array(buf,4,len)));
   if(j.tipo==='corpo'){ onCorpo(j, buf.slice(4+len)); return; }
-  const idx=new Uint32Array(buf.slice(4+len));
-  for(let k=0;k<idx.length;k++){ const i=idx[k]; if(heat[i]<=0) active[nActive++]=i; heat[i]=1; }
+  const idx=j.enc==='dv'?decodeDV(new Uint8Array(buf,4+len)):new Uint32Array(buf.slice(4+len));
+  for(let k=0;k<idx.length;k++){ const i=idx[k]; if(i<N){ if(heat[i]<=0) active[nActive++]=i; heat[i]=1; } }
   updateUI(j);
 }
 
 function onCorpo(j, bytes){
-  const img=$('corpoImg'); const url=URL.createObjectURL(new Blob([bytes],{type:'image/jpeg'}));
-  img.onload=()=>{ if(corpoUrl) URL.revokeObjectURL(corpoUrl); corpoUrl=url; img.classList.add('on'); };
-  img.src=url; corpoT=performance.now();
+  corpoT=performance.now();
+  if(j.fmt==='pose'){
+    Corpo3D.quadro(j, bytes);
+    if(Corpo3D.estado.pronto){ $('corpoCv').classList.add('on'); $('corpoImg').classList.remove('on'); }
+  }else{
+    const img=$('corpoImg'); const url=URL.createObjectURL(new Blob([bytes],{type:'image/jpeg'}));
+    img.onload=()=>{ if(corpoUrl) URL.revokeObjectURL(corpoUrl); corpoUrl=url; img.classList.add('on'); $('corpoCv').classList.remove('on'); };
+    img.src=url;
+  }
   $('corpoModo').textContent=MODE_TEXT[j.mode]||''; $('corpoModo').className=j.mode||'';
   rxCount++; const now=performance.now(); if(now-rxT0>=1000){ rxFps=Math.round(rxCount*1000/(now-rxT0)); rxCount=0; rxT0=now; }
   $('corpoInfo').textContent=j.body_mode==='kinematic'

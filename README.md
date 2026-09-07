@@ -262,9 +262,38 @@ V2 da Pons). O que está lá:
   mostra o endereço dela.
 - Nomes de token com emoji derrubavam o console cp1252 → `sys.stdout.reconfigure(errors='replace')`.
 
+## Site público (07/09/2026): mosca desenhada no navegador + relay no Railway
+
+O JPEG de 1280×540 a 60 fps servia no localhost, mas eram ~3 MB/s por espectador. Para a internet, dois
+pedaços novos:
+
+- **Mosca no navegador** (`site/fly-cliente.js`): `corpo/exportar_modelo.py` exporta o modelo compilado pelo
+  MuJoCo (71 corpos, 93 juntas, 69 malhas, texturas já recoloridas) para `site/fly-model.json` + `.bin` +
+  `site/fly-tex/`. As malhas são decimadas por quádricas (`fast_simplification`) mantendo a UV por vértice:
+  502 mil → 117 mil triângulos, 1,4 MB + 272 KB de textura. O corpo manda **poses** (`FLY_CORPO_SAIDA=pose`,
+  padrão): o `qpos` inteiro (99 floats) + a câmera, 30×/s, ~400 B cada (`corpo/corpo3d_envio.py`). A página
+  refaz a cinemática direta igual ao `mj_kinematics` (pais antes dos filhos, dobradiça em torno do próprio
+  `jnt_pos`, junta livre da raiz direto do qpos), interpola entre os dois últimos quadros (50 ms de atraso) e
+  desenha em three.js com chão preto e reflexo (cópia espelhada em z, translúcida). `jpeg` e `ambos` seguem
+  disponíveis. Refazer a exportação se o modelo ou as cores mudarem.
+- **Índices dos neurônios em delta-varint** (`enc: 'dv'` no cabeçalho): ordenados, diferença em varint de 7 bits,
+  ~1 byte por neurônio em vez de 4. As duas páginas decodificam (`decodeDV`).
+- **Relay** (`relay/servidor.py`, aiohttp, roda no Railway com o `Procfile` + `requirements.txt` da raiz): o PC
+  conecta em `/fonte?token=…` (`brain/relay_cliente.py`, ligado por `FLY_RELAY_URL` + `FLY_RELAY_TOKEN`) e manda
+  o último quadro do cérebro, o último do corpo e os eventos do mercado; os espectadores conectam em `/ws` e
+  recebem o mesmo protocolo da página local (a página não muda). Cada espectador tem fila de 6: quem atrasa
+  perde quadro, não acumula. O relay devolve `{"viewers": n}` e o número entra no campo `viewers` dos quadros.
+  Sem `/dev`, sem estímulo pelo público. `/health` mostra se a fonte está ligada.
+- **Subir no Railway:** novo serviço a partir do repo `ojotunn/flybrain` (raiz; o Procfile é detectado),
+  variável `FLY_RELAY_TOKEN` com um segredo longo, gerar domínio. No PC, no `START-Windows.bat`, descomentar
+  `FLY_RELAY_URL=wss://<dominio>/fonte` e `FLY_RELAY_TOKEN` (o mesmo). Testado ponta a ponta com o relay local
+  na porta 8436 (`FLY_RELAY_TOKEN=teste-local PORT=8436 py\Scripts\python.exe relay\servidor.py`).
+- **Página:** carteira dela na barra do topo (copiar) e em números grandes no painel; ABOUT abre a descrição da
+  tecnologia (cérebro, corpo, mapa do mercado, regras das ordens, o que não existe, créditos).
+
 ## Próximos passos
 
-1. Adote um neurônio, relatório diário, segunda mosca; mundo virtual com manchas de açúcar.
-2. Troca para o conectoma da Janelia (licença) antes do token com taxa; deploy do site no Railway com o cérebro
-   nesta máquina; corpo desenhado no navegador (banda).
-3. Senha na página `/dev`; vigia que reinicia os três processos se um cair.
+1. Michel cria o serviço no Railway e aponta o `.bat` para ele; domínio próprio.
+2. Troca para o conectoma da Janelia (licença) antes do token com taxa.
+3. Vigia que reinicia os três processos se um cair; adote um neurônio; relatório diário; segunda mosca; mundo
+   virtual com manchas de açúcar.
