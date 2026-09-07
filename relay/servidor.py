@@ -158,6 +158,13 @@ async def api_mercado(request):
                               'eventos': [json.loads(x) for x in list(est['eventos'])[-40:]]})
 
 
+async def versao(request):
+    """Assinatura da pagina servida: a pagina compara a cada minuto e recarrega sozinha quando muda."""
+    import hashlib
+    h = hashlib.md5((SITE / 'publico.html').read_bytes() + (SITE / 'fly-cliente.js').read_bytes()).hexdigest()[:12]
+    return web.Response(text=h, content_type='text/plain', headers={'Cache-Control': 'no-store'})
+
+
 async def saude(request):
     est = request.app['estado']
     return web.json_response({'ok': True, 'fonte': est.get('fonte') is not None,
@@ -189,6 +196,7 @@ def main():
     app.router.add_get('/api/estado', api_estado)
     app.router.add_get('/api/mercado', api_mercado)
     app.router.add_get('/health', saude)
+    app.router.add_get('/api/versao', versao)
     app.router.add_static('/static', SITE, show_index=False)
     print(f'[relay] porta {PORTA}; token {"definido" if TOKEN else "AUSENTE (fonte nao consegue entrar)"}', flush=True)
     web.run_app(app, host='0.0.0.0', port=PORTA, print=None)

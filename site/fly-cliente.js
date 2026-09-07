@@ -40,11 +40,21 @@ window.Corpo3D=(function(){
     const loader=new THREE.TextureLoader(); const texs={}, mats={}, matsE={};
     for(const [k,m] of Object.entries(j.materiais)){
       let map=null;
-      if(m.tex){ map=texs[m.tex]; if(!map){ map=loader.load('/static/fly-tex/'+m.tex+'.png'); map.flipY=false; map.colorSpace=THREE.SRGBColorSpace; map.anisotropy=4; texs[m.tex]=map; } }
+      // cor de reserva castanha: se a textura nao carregar, a mosca fica lisa em vez de preta (sem textura o
+      // three.js amostra um mapa vazio = preto sobre fundo preto, e ela some)
+      const reserva=m.tex?new THREE.Color(0.52,0.40,0.28):new THREE.Color(m.rgba[0],m.rgba[1],m.rgba[2]);
       const cor=new THREE.Color(m.rgba[0],m.rgba[1],m.rgba[2]); const a=m.rgba[3];
-      mats[k]=new THREE.MeshStandardMaterial({color:cor, map, transparent:a<0.999, opacity:a, roughness:Math.max(0.3,1-0.7*(m.shininess||0.3)), metalness:0.0, side:THREE.DoubleSide});
+      mats[k]=new THREE.MeshStandardMaterial({color:m.tex?reserva:cor, transparent:a<0.999, opacity:a, roughness:Math.max(0.3,1-0.7*(m.shininess||0.3)), metalness:0.0, side:THREE.DoubleSide});
       // reflexo no chao: copia escura e translucida, espelhada em z
-      matsE[k]=new THREE.MeshBasicMaterial({color:cor.clone().multiplyScalar(0.5), map, transparent:true, opacity:0.20*a, side:THREE.DoubleSide, depthWrite:false});
+      matsE[k]=new THREE.MeshBasicMaterial({color:(m.tex?reserva:cor).clone().multiplyScalar(0.5), transparent:true, opacity:0.20*a, side:THREE.DoubleSide, depthWrite:false});
+      if(m.tex){
+        const aplicar=(t)=>{ for(const mm of [mats[k],matsE[k]]){ mm.map=t; mm.color.copy(mm===mats[k]?cor:cor.clone().multiplyScalar(0.5)); mm.needsUpdate=true; } };
+        if(texs[m.tex]){ const t=texs[m.tex]; if(t.image) aplicar(t); else t.__esperando.push(aplicar); }
+        else{
+          const t=loader.load('/static/fly-tex/'+m.tex+'.png', (tx)=>{ (tx.__esperando||[]).forEach(f=>f(tx)); tx.__esperando=[]; }, undefined, ()=>console.warn('textura nao carregou:', m.tex));
+          t.flipY=false; t.colorSpace=THREE.SRGBColorSpace; t.anisotropy=4; t.__esperando=[aplicar]; texs[m.tex]=t;
+        }
+      }
     }
     const geos=j.malhas.map(ml=>{
       const g=new THREE.BufferGeometry();

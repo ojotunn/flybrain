@@ -320,6 +320,13 @@ async def api_config(request):
     return web.json_response(app['estado'].get('config') or {})
 
 
+async def api_versao(request):
+    """Assinatura da pagina: a pagina compara a cada minuto e recarrega sozinha quando eu publico versao nova."""
+    import hashlib
+    h = hashlib.md5((SITE / 'publico.html').read_bytes() + (SITE / 'fly-cliente.js').read_bytes()).hexdigest()[:12]
+    return web.Response(text=h, content_type='text/plain', headers={'Cache-Control': 'no-store'})
+
+
 async def api_mercado_limpar(request):
     """Zera o historico de cards (so local; o relay zera ao redeployar). Usado no lancamento para o feed recomecar."""
     request.app['estado']['mercado_eventos'].clear()
@@ -391,6 +398,7 @@ def main():
     app.router.add_post('/api/mercado', api_mercado)
     app.router.add_post('/api/mercado/limpar', api_mercado_limpar)
     app.router.add_get('/api/config', api_config)
+    app.router.add_get('/api/versao', api_versao)
     app.router.add_post('/api/config', api_config)
     app['estado']['config'] = ler_config()
     app.router.add_post('/api/estimulo', api_estimulo)
