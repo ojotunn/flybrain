@@ -14,6 +14,8 @@ from aiohttp import web
 
 PORTA = int(os.environ.get('PORT', '8080'))
 TOKEN = os.environ.get('FLY_RELAY_TOKEN', '')
+import uuid
+INSTANCIA = uuid.uuid4().hex[:8]     # cada conteiner tem o seu; a fonte confere pelo /health se esta no conteiner que atende o publico
 RAIZ = Path(__file__).resolve().parent.parent
 SITE = RAIZ / 'site'
 FILA_MAX = 6
@@ -73,7 +75,7 @@ async def fonte(request):
     async def contar():
         while not ws.closed:
             try:
-                await ws.send_str(json.dumps({'viewers': len(app['espectadores'])}))
+                await ws.send_str(json.dumps({'viewers': len(app['espectadores']), 'instancia': INSTANCIA}))
             except Exception:
                 break
             await asyncio.sleep(2)
@@ -167,13 +169,17 @@ async def versao(request):
 
 async def saude(request):
     est = request.app['estado']
-    return web.json_response({'ok': True, 'fonte': est.get('fonte') is not None,
-                              'fonte_ha_s': round(time.time() - est.get('fonte_t', 0)), 'viewers': len(request.app['espectadores'])})
+    return web.json_response({'ok': True, 'fonte': est.get('fonte') is not None, 'instancia': INSTANCIA,
+                              'fonte_ha_s': round(time.time() - est.get('fonte_t', 0)) if est.get('fonte_t') else None,
+                              'viewers': len(request.app['espectadores'])})
 
 
 async def index(request):
     """Pagina publica com o CA do token e o link do X vindos das variaveis do servico (FLY_CA, FLY_X_URL):
     mudar a variavel no Railway redeploya em um minuto, sem mexer em codigo."""
+    host = (request.headers.get('Host') or '').split(':')[0].lower()
+    if host == 'flybrain.finance':      # raiz sem www: manda para o www, onde o PC esta conectado (07/09)
+        raise web.HTTPMovedPermanently('https://www.flybrain.finance/')
     html = (SITE / 'publico.html').read_text(encoding='utf-8')
     cfg = request.app['estado'].get('config') or {}
     ca = (cfg.get('ca') or os.environ.get('FLY_CA', '')).strip().replace("'", '')

@@ -20,6 +20,7 @@ class Uplink:
         self.evento = asyncio.Event()
         self.ligado = False
         self.viewers = 0
+        self.instancia = ''
         self.seq = 0
         self.enviados = 0
         self.erro = ''
@@ -42,6 +43,26 @@ class Uplink:
                     continue
                 if 'viewers' in m:
                     self.viewers = int(m['viewers'])
+                if 'instancia' in m:
+                    self.instancia = str(m['instancia'])
+
+    async def _vigiar_instancia(self, ws, sess):
+        """A cada 20 s pergunta ao /health publico qual conteiner atende o publico. Depois de um redeploy do Railway
+        o conteiner antigo continua vivo enquanto tiver esta conexao aberta, e o publico cai no novo, sem fonte
+        (07/09: 'o site esta assim sem a mosca'). Se a instancia publica for outra, fecha para reconectar nela."""
+        url = self.url.replace('wss://', 'https://').replace('ws://', 'http://').rsplit('/fonte', 1)[0] + '/health'
+        while not ws.closed:
+            await asyncio.sleep(20)
+            try:
+                async with sess.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    h = await r.json()
+            except Exception:
+                continue
+            publica = str(h.get('instancia', ''))
+            if publica and self.instancia and publica != self.instancia:
+                print(f'[relay] o publico esta no conteiner {publica}, eu no {self.instancia}: reconectando', flush=True)
+                await ws.close()
+                return
 
     async def rodar(self):
         espera = 1
@@ -58,7 +79,9 @@ class Uplink:
                                 await ws.send_bytes(item)
                             else:
                                 await ws.send_str(item)
+                        self.instancia = ''
                         leitor = asyncio.create_task(self._ler(ws))
+                        vigia = asyncio.create_task(self._vigiar_instancia(ws, sess))
                         try:
                             while not ws.closed:
                                 try:
@@ -75,6 +98,7 @@ class Uplink:
                                     await ws.send_str(self.textos.popleft())
                         finally:
                             leitor.cancel()
+                            vigia.cancel()
             except Exception as e:
                 self.erro = str(e)[:100]
                 print(f'[relay] caiu: {self.erro}; tentando em {espera} s', flush=True)
