@@ -98,6 +98,10 @@ async def fonte(request):
                 if m.get('tipo') == 'ola':
                     app['estado']['ola'] = msg.data
                     continue
+                if m.get('tipo') == 'config':            # CA e X vindos do PC: guarda (injeta na pagina) e espalha ao vivo
+                    app['estado']['config'] = {'ca': str(m.get('ca', '')), 'x': str(m.get('x', ''))}
+                    espalhar(app, 't', msg.data)
+                    continue
                 if m.get('tipo') == 'mercado':
                     if m.get('classe') == 'resumo':
                         app['estado']['resumo'] = msg.data
@@ -121,6 +125,8 @@ async def ws_handler(request):
     est = app['estado']
     if est.get('ola'):
         e.enviar(('t', est['ola']))
+    if est.get('config'):
+        e.enviar(('t', json.dumps(dict(est['config'], tipo='config'), separators=(',', ':'))))
     if est.get('corpo'):
         e.enviar(('b', est['corpo']))
     if est.get('quadro'):
@@ -162,8 +168,9 @@ async def index(request):
     """Pagina publica com o CA do token e o link do X vindos das variaveis do servico (FLY_CA, FLY_X_URL):
     mudar a variavel no Railway redeploya em um minuto, sem mexer em codigo."""
     html = (SITE / 'publico.html').read_text(encoding='utf-8')
-    ca = os.environ.get('FLY_CA', '').strip()
-    x = os.environ.get('FLY_X_URL', '').strip()
+    cfg = request.app['estado'].get('config') or {}
+    ca = (cfg.get('ca') or os.environ.get('FLY_CA', '')).strip().replace("'", '')
+    x = (cfg.get('x') or os.environ.get('FLY_X_URL', '')).strip().replace("'", '')
     if ca and "const CA='';" in html:
         html = html.replace("const CA='';", f"const CA='{ca}';", 1)
     if x and "const X_URL='';" in html:
@@ -175,7 +182,7 @@ def main():
     app = web.Application()
     app['espectadores'] = set()
     app['estado'] = {'ola': None, 'quadro': None, 'corpo': None, 'resumo': None, 'eventos': deque(maxlen=200),
-                     'fonte': None, 'fonte_t': 0.0}
+                     'fonte': None, 'fonte_t': 0.0, 'config': None}
     app.router.add_get('/', index)
     app.router.add_get('/ws', ws_handler)
     app.router.add_get('/fonte', fonte)

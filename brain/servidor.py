@@ -57,9 +57,24 @@ def mensagem_ola(app):
     }
 
 
+ARQ_CONFIG = DADOS / 'estado' / 'config.json'     # CA do token e link do X (publicos), sobrevivem a reinicio
+
+
+def ler_config():
+    try:
+        return json.loads(ARQ_CONFIG.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+
+
+def mensagem_config(app):
+    c = app['estado'].get('config') or {}
+    return json.dumps({'tipo': 'config', 'ca': c.get('ca', ''), 'x': c.get('x', '')}, separators=(',', ':'))
+
+
 def snapshot(app):
-    """Estado atual para quem acaba de chegar (pagina local ou relay): resumo, ultimos eventos, ultimo corpo."""
-    itens = []
+    """Estado atual para quem acaba de chegar (pagina local ou relay): config, resumo, ultimos eventos, ultimo corpo."""
+    itens = [mensagem_config(app)]
     if app['estado'].get('mercado_resumo'):
         itens.append(json.dumps(app['estado']['mercado_resumo'], separators=(',', ':')))
     for ev in list(app['estado']['mercado_eventos'])[-12:]:
@@ -275,6 +290,36 @@ async def api_mercado(request):
                               'eventos': list(app['estado']['mercado_eventos'])[-40:]})
 
 
+async def api_config(request):
+    """CA do token e link do X: POST {'ca':..., 'x':...} (so local) guarda, espalha ao vivo para as paginas abertas
+    e para o relay (que injeta na pagina de quem chegar depois). Sem redeploy no lancamento."""
+    app = request.app
+    if request.method == 'POST':
+        m = await request.json()
+        c = dict(app['estado'].get('config') or {})
+        for k in ('ca', 'x'):
+            if k in m:
+                c[k] = str(m[k]).strip()
+        app['estado']['config'] = c
+        try:
+            ARQ_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+            ARQ_CONFIG.write_text(json.dumps(c), encoding='utf-8')
+        except Exception as e:
+            print(f'[servidor] nao gravei config: {e}', flush=True)
+        pacote = mensagem_config(app)
+        if app['uplink']:
+            app['uplink'].push_txt(pacote)
+        for ws in list(app['clientes']):
+            if ws in app['sem_corpo']:
+                continue
+            try:
+                await ws.send_str(pacote)
+            except Exception:
+                app['clientes'].discard(ws)
+        print(f'[servidor] config: {c}', flush=True)
+    return web.json_response(app['estado'].get('config') or {})
+
+
 async def api_mercado_limpar(request):
     """Zera o historico de cards (so local; o relay zera ao redeployar). Usado no lancamento para o feed recomecar."""
     request.app['estado']['mercado_eventos'].clear()
@@ -345,6 +390,9 @@ def main():
     app.router.add_get('/api/mercado', api_mercado)
     app.router.add_post('/api/mercado', api_mercado)
     app.router.add_post('/api/mercado/limpar', api_mercado_limpar)
+    app.router.add_get('/api/config', api_config)
+    app.router.add_post('/api/config', api_config)
+    app['estado']['config'] = ler_config()
     app.router.add_post('/api/estimulo', api_estimulo)
     app.router.add_post('/corpo/quadro', corpo_quadro)
     app.router.add_get('/corpo/ws', corpo_ws)

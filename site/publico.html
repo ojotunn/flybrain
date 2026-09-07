@@ -221,13 +221,18 @@ let rotBase=0, rotSpeed=0.12, dragOff=0, rotX=0.08, lastInteract=-1e9, lastT=0, 
 const $=id=>document.getElementById(id);
 const smooth={}; GROUPS.forEach(g=>smooth[g[0]]=0);
 const regHist=[];
-const CA='';  // contrato do token: preencher no lancamento
+const CA='';  // contrato do token: o relay injeta aqui; e tambem chega ao vivo pela mensagem 'config'
 const X_URL='';
+let ca=CA, xUrl=X_URL;
+function aplicarConfig(c){   // CA e X ao vivo (POST /api/config no PC -> relay -> todas as paginas abertas)
+  if(typeof c.ca==='string' && c.ca && c.ca!==ca){ ca=c.ca; $('caTxt').textContent=curto(ca); $('ca').classList.remove('vazio'); }
+  if(typeof c.x==='string' && c.x && c.x!==xUrl){ xUrl=c.x; $('xLink').href=xUrl; $('xLink').style.display=''; }
+}
 const EXPLORER='https://robinhoodchain.blockscout.com';
 const curto=a=>a?a.slice(0,6)+'…'+a.slice(-4):'';
 let carteira='';   // endereco dela, vem no resumo do mercado
 function copiar(id, txtId, valor){ if(!valor) return; navigator.clipboard.writeText(valor).then(()=>{ $(id).classList.add('copiado'); $(txtId).textContent='copied'; setTimeout(()=>{ $(id).classList.remove('copiado'); $(txtId).textContent=curto(valor); },1500); }); }
-window.addEventListener('DOMContentLoaded',()=>{ if(CA){ $('caTxt').textContent=curto(CA); } else { $('ca').classList.add('vazio'); } if(X_URL) $('xLink').href=X_URL; else $('xLink').style.display='none'; $('ca').onclick=()=>copiar('ca','caTxt',CA); $('wal').onclick=()=>copiar('wal','walTxt',carteira); });
+window.addEventListener('DOMContentLoaded',()=>{ if(CA){ $('caTxt').textContent=curto(CA); } else { $('ca').classList.add('vazio'); } if(X_URL) $('xLink').href=X_URL; else $('xLink').style.display='none'; $('ca').onclick=()=>copiar('ca','caTxt',ca); $('wal').onclick=()=>copiar('wal','walTxt',carteira); });
 document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ $('sobre').classList.remove('on'); return; } if($('sobre').classList.contains('on')) return; if(e.key==='c'||e.key==='C'){ $('app').classList.toggle('cinema'); setTimeout(resize,50);} });
 
 async function load(){
@@ -338,7 +343,7 @@ function connect(){
   ws.onclose=()=>{ setStatus('off','brain offline · reconnecting'); setTimeout(connect,retry); retry=Math.min(retry*2,15000); };
   ws.onerror=()=>{ try{ws.close();}catch(e){} };
   ws.onmessage=e=>{
-    if(typeof e.data==='string'){ const m=JSON.parse(e.data); if(m.tipo==='ola') hello=m; else if(m.tipo==='mercado') onMercado(m); return; }
+    if(typeof e.data==='string'){ const m=JSON.parse(e.data); if(m.tipo==='ola') hello=m; else if(m.tipo==='mercado') onMercado(m); else if(m.tipo==='config') aplicarConfig(m); return; }
     onFrame(e.data);
   };
 }
