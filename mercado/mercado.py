@@ -18,6 +18,9 @@ import urllib.request
 from collections import deque
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from sentidos_chain import SentidosChain   # noqa: E402
+
 SERVIDOR = os.environ.get('FLY_SERVIDOR', 'http://localhost:8435')
 WS_URL = SERVIDOR.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws?papel=mercado'
 GECKO = 'https://api.geckoterminal.com/api/v2/networks/robinhood'
@@ -81,6 +84,19 @@ def ignorados():
     if IGNORAR_ARQ.exists():
         lista |= {l.strip().lower() for l in IGNORAR_ARQ.read_text().splitlines() if l.strip() and not l.startswith('#')}
     return lista
+
+
+SENTIDOS_ARQ = Path(__file__).resolve().parent / 'sentidos.txt'   # token cujos trades sao os SENTIDOS dela (o dela)
+SENTIDOS_INTERVALO = float(os.environ.get('FLY_MERCADO_SENTIDOS_INTERVALO', '4'))   # s entre leituras da chain
+
+
+def sentidos_config():
+    """Endereco do token que ela SENTE (mercado/sentidos.txt ou FLY_MERCADO_SENTIDOS); vazio = sente o que opera."""
+    v = os.environ.get('FLY_MERCADO_SENTIDOS', '').strip()
+    if SENTIDOS_ARQ.exists():
+        linhas = [l.strip() for l in SENTIDOS_ARQ.read_text().splitlines() if l.strip() and not l.startswith('#')]
+        v = linhas[0] if linhas else ''
+    return v.lower()
 
 
 ORDENS_ARQ = Path(__file__).resolve().parent / 'ordens.txt'     # 'on' | 'off': liga/desliga as ordens sem reiniciar
@@ -402,6 +418,62 @@ def main():
     ultima_carteira = 0.0
     ultima_curva = 0.0
     ativas = None                          # estado do interruptor das ordens (card quando muda)
+    sent = None                            # feed proprio dos sentidos (SentidosChain) ou None
+    sent_cfg = ''
+    prox_sent_tentativa = 0.0
+    ultima_sent = 0.0
+    precos_sent = deque(maxlen=90)
+    chain_leitura = None
+
+    def processar(novos, trades):
+        """Trades novos viram estimulos e cards; a lista recente vira os sinais de vibracao e sombra."""
+        nonlocal ultimo_evento, ultimo_trade_real, ultimo_estimulo, ultimo_jo, ultimo_lc4
+        agora = time.time()
+        if novos:
+            ultimo_evento = agora
+        p50, p90 = limiares(historico)
+        rotulo_token = sent.nome if sent is not None else pool['nome']
+        for t in novos:
+            historico.append(t)
+            ultimo_trade_real = agora
+            novo_holder = t['kind'] == 'buy' and t['de'] not in enderecos
+            enderecos.add(t['de'])
+            lista, nome, extras = traduzir_trade(t, p50, p90, novo_holder)
+            for est, ms in lista:
+                estimular(est, ms)
+            ultimo_estimulo = (f'{t["kind"]} ${t["usd"]:,.2f}', agora)
+            publicar({'classe': 'trade', 'kind': t['kind'], 'usd': round(t['usd'], 2), 'de': t['de'][:10],
+                      'tx': t['tx'], 'estimulo': nome, 'ms': round(lista[0][1]), 'extra': ' + '.join(extras) or None,
+                      'replay': False, 'quando': t['quando'], 'token': rotulo_token, 'fonte': t.get('fonte', 'gecko')})
+        # muita transacao no ultimo minuto: vibracao (uma vez por minuto); onda de vendas: sombra
+        recentes = [t for t in trades if t['quando'] >= time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(agora - 60))]
+        if len(recentes) >= 6 and agora - ultimo_jo > 60:
+            ultimo_jo = agora
+            estimular('jo', 300.0)
+            publicar({'classe': 'sinal', 'texto': f'{len(recentes)} trades in a minute → vibration', 'estimulo': 'jo'})
+        vendas_min = [t for t in recentes if t['kind'] == 'sell']
+        if len(vendas_min) >= 4 and agora - ultimo_lc4 > 120:
+            ultimo_lc4 = agora
+            estimular('lc4', 500.0)
+            publicar({'classe': 'sinal', 'texto': f'{len(vendas_min)} sells in a minute → shadow', 'estimulo': 'lc4'})
+
+    def tendencia(serie):
+        """Preco em 5 min: subindo firme = impulso de andar; caindo firme = empurrao de re (a cada 2 min)."""
+        nonlocal ultimo_p9
+        agora = time.time()
+        antigos = [p for tt, p in serie if agora - tt >= 300]
+        atual = serie[-1][1] if serie else 0.0
+        if antigos and atual > 0 and agora - ultimo_p9 > 120:
+            var = atual / antigos[0] - 1
+            if var >= 0.02:
+                ultimo_p9 = agora
+                estimular('p9', 400.0)
+                publicar({'classe': 'sinal', 'texto': f'price +{var * 100:.1f}% in 5 min → walk drive', 'estimulo': 'p9'})
+            elif var <= -0.02:
+                ultimo_p9 = agora
+                estimular('mdn', 400.0)
+                publicar({'classe': 'sinal', 'texto': f'price {var * 100:.1f}% in 5 min → backs away', 'estimulo': 'mdn'})
+
     vistos = set()
     historico = deque(maxlen=600)          # trades ja lidos (para replay)
     precos = deque(maxlen=60)              # (t, preco_eth) para a tendencia
@@ -485,54 +557,46 @@ def main():
             if carteira is None or not calibrado:
                 time.sleep(1.0)
                 continue
-            trades = ler_trades(pool['pool'])
-            novos = [t for t in trades if t['tx'] not in vistos]
-            for t in trades:
-                vistos.add(t['tx'])
-            if len(vistos) > 5000:
-                vistos = set(t['tx'] for t in trades)
-            if not historico and trades:
-                historico.extend(trades)               # primeira leitura: guarda para o replay, sem estimular
-                enderecos.update(t['de'] for t in trades)
-                novos = []
-            if novos:
-                ultimo_evento = agora
-            p50, p90 = limiares(historico)
-            for t in novos:
-                historico.append(t)
-                ultimo_trade_real = agora
-                novo_holder = t['kind'] == 'buy' and t['de'] not in enderecos
-                enderecos.add(t['de'])
-                lista, nome, extras = traduzir_trade(t, p50, p90, novo_holder)
-                for est, ms in lista:
-                    estimular(est, ms)
-                ultimo_estimulo = (f'{t["kind"]} ${t["usd"]:,.2f}', agora)
-                publicar({'classe': 'trade', 'kind': t['kind'], 'usd': round(t['usd'], 2), 'de': t['de'][:10],
-                          'tx': t['tx'], 'estimulo': nome, 'ms': round(lista[0][1]), 'extra': ' + '.join(extras) or None,
-                          'replay': False, 'quando': t['quando']})
-            # muita transacao no ultimo minuto: vibracao (uma vez por minuto); onda de vendas: sombra
-            recentes = [t for t in trades if t['quando'] >= time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(agora - 60))]
-            if len(recentes) >= 6 and agora - ultimo_jo > 60:
-                ultimo_jo = agora
-                estimular('jo', 300.0)
-                publicar({'classe': 'sinal', 'texto': f'{len(recentes)} trades in a minute → vibration', 'estimulo': 'jo'})
-            vendas_min = [t for t in recentes if t['kind'] == 'sell']
-            if len(vendas_min) >= 4 and agora - ultimo_lc4 > 120:
-                ultimo_lc4 = agora
-                estimular('lc4', 500.0)
-                publicar({'classe': 'sinal', 'texto': f'{len(vendas_min)} sells in a minute → shadow', 'estimulo': 'lc4'})
-            # preco em 5 min: subindo firme = impulso de andar; caindo firme = empurrao de re (a cada 2 min)
-            antigos = [p for tt, p in precos if agora - tt >= 300]
-            if antigos and preco > 0 and agora - ultimo_p9 > 120:
-                var = preco / antigos[0] - 1
-                if var >= 0.02:
-                    ultimo_p9 = agora
-                    estimular('p9', 400.0)
-                    publicar({'classe': 'sinal', 'texto': f'price +{var * 100:.1f}% in 5 min → walk drive', 'estimulo': 'p9'})
-                elif var <= -0.02:
-                    ultimo_p9 = agora
-                    estimular('mdn', 400.0)
-                    publicar({'classe': 'sinal', 'texto': f'price {var * 100:.1f}% in 5 min → backs away', 'estimulo': 'mdn'})
+            if sent is None:                       # sem feed proprio: sente o token que opera (GeckoTerminal)
+                trades = ler_trades(pool['pool'])
+                novos = [t for t in trades if t['tx'] not in vistos]
+                for t in trades:
+                    vistos.add(t['tx'])
+                if len(vistos) > 5000:
+                    vistos = set(t['tx'] for t in trades)
+                if not historico and trades:
+                    historico.extend(trades)           # primeira leitura: guarda para o replay, sem estimular
+                    enderecos.update(t['de'] for t in trades)
+                    novos = []
+                processar(novos, trades)
+                tendencia(precos)
+        # ----- sentidos direto da chain (o token dela): liga/desliga por mercado/sentidos.txt, sem reiniciar -----
+        cfg = sentidos_config()
+        if calibrado and cfg != sent_cfg and agora >= prox_sent_tentativa:
+            if cfg:
+                try:
+                    if chain_leitura is None:
+                        import pons
+                        chain_leitura = pons.Pons()
+                    sent = SentidosChain(chain_leitura, cfg)
+                    sent_cfg = cfg
+                    historico.clear(); enderecos.clear(); replay_fila.clear(); precos_sent.clear()
+                    print(f'[mercado] sentidos: {sent.nome} direto da chain (curva {sent.curva})', flush=True)
+                    publicar({'classe': 'info', 'texto': f'she now feels every trade of {sent.nome}, straight from the chain'})
+                except Exception as e:
+                    prox_sent_tentativa = agora + 30
+                    print(f'[mercado] feed da chain falhou para {cfg}: {str(e)[:80]}; tento em 30 s', flush=True)
+            else:
+                sent, sent_cfg = None, ''
+                historico.clear(); enderecos.clear(); replay_fila.clear()
+                publicar({'classe': 'info', 'texto': f'she feels the trades of {pool["nome"]} again'})
+        if sent is not None and agora - ultima_sent >= SENTIDOS_INTERVALO:
+            ultima_sent = agora
+            novos = sent.ler(eth_usd)
+            if sent.preco_eth > 0:
+                precos_sent.append((agora, sent.preco_eth))
+            processar(novos, list(sent.historico))
+            tendencia(precos_sent)
 
         # mercado parado ha 4 min: poeira assenta nos olhos (limpeza), a cada 4 min
         if agora - ultimo_evento > 240 and agora - ultimo_poeira > 240:
@@ -660,6 +724,9 @@ def main():
                       'pnl_usd': round((valor - carteira.eth0) * eth_usd, 2),
                       'endereco': carteira.endereco, 'reserva_gas_eth': RESERVA_GAS_ETH if MODO == 'real' else 0,
                       'ordens_ativas': bool(ativas),
+                      'sentidos': sent.nome if sent is not None else pool['nome'],
+                      'sentidos_fonte': 'chain' if sent is not None else 'gecko',
+                      'sentidos_erro': (sent.erro if sent is not None else ''),
                       'quieto_s': round(agora - ultimo_trade_real), 'replay': REPLAY and agora - ultimo_trade_real > 90})
         time.sleep(1.0)
 

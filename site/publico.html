@@ -378,7 +378,7 @@ function onMercado(m){
     $('wPnl').textContent=(p>0?'+':'')+p.toFixed(2)+'%'; $('wPnl').className=cls; $('wPnl').style.color=cls==='up'?'var(--up)':(cls==='down'?'var(--down)':'#fff');
     $('wOrd').textContent=m.ordens||0;
     if(m.endereco && $('walTxt').textContent!==curto(m.endereco) && !$('wal').classList.contains('copiado')){ carteira=m.endereco; $('walTxt').textContent=curto(m.endereco); }
-    $('mResumo').innerHTML=`she is watching <b>${m.token}</b> · price <b>${(m.preco_eth||0).toExponential(2)} ETH</b> · 24h vol $${Math.round(m.vol_h24||0).toLocaleString()}<br>`
+    $('mResumo').innerHTML=(m.sentidos&&m.sentidos!==m.token?`she feels every trade of <b>${m.sentidos}</b>${m.sentidos_fonte==='chain'?' (live from the chain)':''} · she trades <b>${m.token}</b>`:`she is watching <b>${m.token}</b>`)+` · price <b>${(m.preco_eth||0).toExponential(2)} ETH</b> · 24h vol $${Math.round(m.vol_h24||0).toLocaleString()}<br>`
       +`wallet value <b>$${(m.valor_usd||0).toFixed(2)}</b> (${(m.pnl_usd||0)>=0?'+':''}$${(m.pnl_usd||0).toFixed(2)})`
       +(m.endereco?` · <a class="q" href="${EXPLORER}/address/${m.endereco}" target="_blank" rel="noopener">${curto(m.endereco)} on the explorer</a>`:'')
       +`<br>per order: ${m.lote_pct||5}% of her ETH${m.max_ordem_usd?`, max <b>$${m.max_ordem_usd}</b>`:''} · at least 20 s apart${m.modo==='real'?' · real ETH, real curve':''}`
@@ -388,7 +388,7 @@ function onMercado(m){
   const box=$('mCards'); const el=document.createElement('div');
   if(m.classe==='trade'){
     el.className='card '+m.kind;
-    el.innerHTML=`<span class="q">${hora(m.t)}</span> ${m.kind==='buy'?'BUY':'SELL'} $${(m.usd||0).toFixed(2)} by ${m.de||'?'} → she tastes <b>${m.estimulo}</b>${m.extra?' + sees a '+m.extra:''}${m.replay?' <span class="r">replay</span>':''}`;
+    el.innerHTML=`<span class="q">${hora(m.t)}</span> ${m.kind==='buy'?'BUY':'SELL'}${m.token?' '+m.token:''} $${(m.usd||0).toFixed(2)} by ${m.de||'?'} → she tastes <b>${m.estimulo}</b>${m.extra?' + sees a '+m.extra:''}${m.replay?' <span class="r">replay</span>':''}`;
   }else if(m.classe==='ordem'){
     el.className='card ordem '+m.lado;
     el.innerHTML=`<span class="q">${hora(m.t)}</span> <b>SHE ${m.lado==='buy'?'BOUGHT':'SOLD'}</b> ${(m.eth||0).toFixed(4)} ETH @ ${(m.preco_eth||0).toExponential(2)} <span class="q">(${m.modo})</span>${m.tx?` <a class="q" href="${EXPLORER}/tx/${m.tx}" target="_blank" rel="noopener">tx ${curto(m.tx)}</a>`:''}<br><span class="r">${m.motivo||''}</span>`;

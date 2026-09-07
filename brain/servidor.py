@@ -275,6 +275,12 @@ async def api_mercado(request):
                               'eventos': list(app['estado']['mercado_eventos'])[-40:]})
 
 
+async def api_mercado_limpar(request):
+    """Zera o historico de cards (so local; o relay zera ao redeployar). Usado no lancamento para o feed recomecar."""
+    request.app['estado']['mercado_eventos'].clear()
+    return web.json_response({'ok': True})
+
+
 async def index(request):
     """Pagina publica (espectador). A de desenvolvimento, com os botoes, fica em /dev."""
     arq = SITE / 'publico.html'
@@ -338,6 +344,7 @@ def main():
     app.router.add_get('/api/eventos', api_eventos)
     app.router.add_get('/api/mercado', api_mercado)
     app.router.add_post('/api/mercado', api_mercado)
+    app.router.add_post('/api/mercado/limpar', api_mercado_limpar)
     app.router.add_post('/api/estimulo', api_estimulo)
     app.router.add_post('/corpo/quadro', corpo_quadro)
     app.router.add_get('/corpo/ws', corpo_ws)
