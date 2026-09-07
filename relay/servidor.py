@@ -159,7 +159,16 @@ async def saude(request):
 
 
 async def index(request):
-    return web.FileResponse(SITE / 'publico.html', headers={'Cache-Control': 'no-store'})
+    """Pagina publica com o CA do token e o link do X vindos das variaveis do servico (FLY_CA, FLY_X_URL):
+    mudar a variavel no Railway redeploya em um minuto, sem mexer em codigo."""
+    html = (SITE / 'publico.html').read_text(encoding='utf-8')
+    ca = os.environ.get('FLY_CA', '').strip()
+    x = os.environ.get('FLY_X_URL', '').strip()
+    if ca and "const CA='';" in html:
+        html = html.replace("const CA='';", f"const CA='{ca}';", 1)
+    if x and "const X_URL='';" in html:
+        html = html.replace("const X_URL='';", f"const X_URL='{x}';", 1)
+    return web.Response(text=html, content_type='text/html', headers={'Cache-Control': 'no-store'})
 
 
 def main():

@@ -1,0 +1,2 @@
+# Tokens que a mosca NUNCA opera: um endereco (token ou curva) por linha. Relido a cada escolha de token.
+# O token dela entra aqui na hora do lancamento.

@@ -16,6 +16,7 @@ import threading
 import time
 import urllib.request
 from collections import deque
+from pathlib import Path
 
 SERVIDOR = os.environ.get('FLY_SERVIDOR', 'http://localhost:8435')
 WS_URL = SERVIDOR.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws?papel=mercado'
@@ -68,6 +69,23 @@ def gecko(caminho):
         return None
     except Exception:
         return None
+
+
+IGNORAR_ARQ = Path(__file__).resolve().parent / 'ignorar.txt'   # tokens que ela NUNCA opera (o dela): um endereco por linha
+
+
+def ignorados():
+    """Enderecos (token ou curva) fora do alcance dela, relidos a cada escolha: FLY_MERCADO_IGNORAR (virgulas) +
+    mercado/ignorar.txt. E assim que o proprio token dela entra na hora do lancamento, sem reiniciar nada."""
+    lista = {a.strip().lower() for a in os.environ.get('FLY_MERCADO_IGNORAR', '').split(',') if a.strip()}
+    if IGNORAR_ARQ.exists():
+        lista |= {l.strip().lower() for l in IGNORAR_ARQ.read_text().splitlines() if l.strip() and not l.startswith('#')}
+    return lista
+
+
+def proibido(c):
+    ign = ignorados()
+    return (c.get('token') or '').lower() in ign or (c.get('pool') or '').lower() in ign
 
 
 def _token_de(item):
@@ -405,6 +423,8 @@ def main():
                 candidatos = listar_pools()
             novo = None
             for c in candidatos:
+                if proibido(c):
+                    continue                          # o token dela (ou outro vetado): nunca
                 if MODO == 'real' and not carteira.usar_token(c.get('token')):
                     continue
                 novo = c
@@ -414,6 +434,15 @@ def main():
                 vistos.clear()
                 print(f'[mercado] token escolhido: {pool["nome"]} ({pool["par"]}) pool {pool["pool"]} token {pool.get("token")}', flush=True)
                 publicar({'classe': 'info', 'texto': f'watching {pool["nome"]} on Pons, the busiest curve right now'})
+        if pool is not None and agora - ultima_leitura >= INTERVALO and proibido(pool):
+            # o token que ela olha entrou na lista de vetados (o dela acabou de ser lancado): larga na hora
+            print(f'[mercado] {pool["nome"]} entrou na lista de vetados; ela larga e escolhe outro', flush=True)
+            publicar({'classe': 'info', 'texto': f'{pool["nome"]} is off limits for her (her own token is never traded) · she moves on'})
+            if MODO == 'real':
+                carteira.largar_token()
+            pool = None
+            ultima_escolha = 0.0
+            continue
         if pool is None:
             time.sleep(INTERVALO)
             continue
