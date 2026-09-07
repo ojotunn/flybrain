@@ -189,7 +189,7 @@ conectoma** (`_base` em `motor.py`): o que ela aprendeu esquece devagar, a fiaç
 primeira noite (já decaído em 12 %) foi apagado para ela recomeçar limpa; o contador "synapses changed since
 birth" volta a fazer sentido.
 
-## Mercado → sentidos → reflexo → ordem (modo papel, 07/09/2026)
+## Mercado → sentidos → reflexo → ordem (07/09/2026; papel ou real)
 
 `mercado/mercado.py`, terceiro processo (o `.bat` já abre). **Sem agente, sem IA de linguagem**: tudo é
 tabela e regra fixa, e o único lugar com "decisão" é o cérebro.
@@ -235,12 +235,36 @@ tabela e regra fixa, e o único lugar com "decisão" é o cérebro.
   copiar os dois para um lugar seguro). Endereço público: `0x4431BcB5b68A3831e9e340011a1F2aB6404f7dfD`.
   Decisão do Michel: carteira separada da de lançamento; ele saca as creator fees à mão e envia para ela.
   `carteira.carregar()` abre o keystore para o modo real. O processo dela nunca terá função de saque.
-- **Não implementado ainda:** execução real na curva (compra/venda V2, leitura de saldo e depósitos), a ser
-  escrita do zero em `mercado/`, com paper antes; a mosca nunca opera o próprio token.
+### Modo real na curva da Pons V2 (07/09/2026, padrão no `.bat`)
+
+`FLY_MERCADO_MODO=real` liga a `CarteiraReal` (em `mercado.py`), que tem a mesma interface da carteira de papel
+mas lê o saldo da chain e executa em `mercado/pons.py` (web3, escrito do zero; interface dos contratos na doc
+V2 da Pons). O que está lá:
+
+- **Contratos:** fábrica `0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e` (`getLaunchedToken(token)` dá a curva, a
+  fase e a taxa do criador); curva com `buy(quoteIn, minTokensOut, recipient)` pagável (o ETH vai em `value`),
+  `sell(tokensIn, minQuoteOut, recipient)` (precisa de `approve` do token para a curva, feito uma vez com
+  allowance máxima) e as views `getReserves`, `sellableTokens`, `feeBps`, `creatorTaxBps`,
+  `currentSnipeTaxBps(addr)`, `graduated`, `isNativeQuote`. A "pool" da GeckoTerminal **é** o endereço da curva;
+  o token vem em `relationships.base_token` (`robinhood_0x...`).
+- **Cotação:** taxas (fee, criador, snipe) saem da entrada; o resto move produto constante
+  `out = net·T/(R+net)`, limitado a `sellableTokens`. Conferido na chain: 0,0002 ETH → 116.840,94 ROBIN, exato.
+  Venda: `bruto = tokens·R/(T+tokens)` menos as taxas. Mínimo aceito = cotação − 3 % (`SLIPPAGE`).
+- **Regras extras do real:** reserva de gás `FLY_MERCADO_RESERVA_GAS` (0,0015 ETH) nunca é gasta; só adota
+  curva **ativa (fase 0)**, e a cada 5 min confere se graduou (graduou → card, larga o token, escolhe outro);
+  não troca de token enquanto segurar tokens; venda não deixa poeira (se o resto valeria < US$ 0,25, vai tudo);
+  falha numa ordem vira card de erro e pausa 2 min. Saldo relido a cada 30 s: diferença que não veio de ordem
+  dela é **depósito ou saque do Michel** → card "wallet topped up" e a base do PnL move junto.
+- **Gás medido (07/09):** preço 0,31 gwei; compra 97.755 gas, venda 75.791 + approve → uns 4 centavos por ordem.
+- **Teste de centavos** (`mercado/teste_real.py [ETH] [--seco]`; `--seco` só cota e simula): 07/09, compra
+  `0x2302bf2e…3b19` e venda `0x7b79945c…3b03e` no ROBIN, custo total 0,000072 ETH (taxa 1 % ida e volta + gás).
+- **Tela:** cards de ordem trazem o link da transação no explorer (`robinhoodchain.blockscout.com`) e o resumo
+  mostra o endereço dela.
+- Nomes de token com emoji derrubavam o console cp1252 → `sys.stdout.reconfigure(errors='replace')`.
 
 ## Próximos passos
 
-1. Eventos da curva da Pons virando estímulo (compra = açúcar, venda = amargo).
-2. Tradutor mercado→sentido e reflexo→ordem, em paper trading.
-3. Adote um neurônio, relatório diário, segunda mosca.
-4. Troca para o conectoma da Janelia; deploy do site no Railway com o cérebro nesta máquina.
+1. Adote um neurônio, relatório diário, segunda mosca; mundo virtual com manchas de açúcar.
+2. Troca para o conectoma da Janelia (licença) antes do token com taxa; deploy do site no Railway com o cérebro
+   nesta máquina; corpo desenhado no navegador (banda).
+3. Senha na página `/dev`; vigia que reinicia os três processos se um cair.
