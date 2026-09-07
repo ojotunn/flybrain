@@ -94,7 +94,7 @@ details p{margin:10px 0 0;line-height:1.55}
 .legend em{font-style:normal;color:var(--muted);font-variant-numeric:tabular-nums}
 .foot{color:var(--dim);font-size:10.5px;line-height:1.5;margin-top:auto;padding:12px 16px;letter-spacing:.04em}
 .foot b{color:var(--muted);font-weight:600}
-@media (max-width:820px){#app{grid-template-columns:1fr;grid-template-rows:44px 80vh 1fr;height:auto;min-height:100vh}#stage{grid-template-rows:1fr 40%}#panel{border-left:0;border-top:1px solid var(--line)}#topo .tag,#topo .ca span:first-child{display:none}#topo{gap:12px;padding:0 12px}}
+@media (max-width:820px){#app{grid-template-columns:1fr;grid-template-rows:44px 80vh 1fr;height:auto;min-height:100vh}#stage{grid-template-rows:1fr 40%}#panel{border-left:0;border-top:1px solid var(--line)}#topo .tag,#topo .ca span:first-child,#topo .ca.vazio,#topo .btn.cinema,#corpoTag,#hint{display:none}#topo{gap:10px;padding:0 12px}#topo .dir{gap:8px}#topo .ca b{white-space:nowrap}#hud .sub{font-size:10.5px}}
 /* sobre: a descricao da tecnologia, em camada por cima da tela */
 #sobre{position:fixed;inset:0;background:rgba(0,0,0,.94);z-index:50;overflow:auto;display:none}
 #sobre.on{display:block}
@@ -126,7 +126,7 @@ details p{margin:10px 0 0;line-height:1.55}
       <span class="ca" id="wal" title="her own wallet on Robinhood Chain · click to copy"><span>HER WALLET</span><b id="walTxt">…</b></span>
       <a href="#" id="xLink">X</a>
       <span class="btn" onclick="document.getElementById('sobre').classList.add('on')">ABOUT</span>
-      <span class="btn" onclick="document.getElementById('app').classList.toggle('cinema');setTimeout(resize,50)">CINEMA &middot; C</span>
+      <span class="btn cinema" onclick="document.getElementById('app').classList.toggle('cinema');setTimeout(resize,50)">CINEMA &middot; C</span>
     </div>
   </div>
   <div id="sobre">
@@ -227,7 +227,7 @@ const EXPLORER='https://robinhoodchain.blockscout.com';
 const curto=a=>a?a.slice(0,6)+'…'+a.slice(-4):'';
 let carteira='';   // endereco dela, vem no resumo do mercado
 function copiar(id, txtId, valor){ if(!valor) return; navigator.clipboard.writeText(valor).then(()=>{ $(id).classList.add('copiado'); $(txtId).textContent='copied'; setTimeout(()=>{ $(id).classList.remove('copiado'); $(txtId).textContent=curto(valor); },1500); }); }
-window.addEventListener('DOMContentLoaded',()=>{ if(CA){ $('caTxt').textContent=curto(CA); } if(X_URL) $('xLink').href=X_URL; $('ca').onclick=()=>copiar('ca','caTxt',CA); $('wal').onclick=()=>copiar('wal','walTxt',carteira); });
+window.addEventListener('DOMContentLoaded',()=>{ if(CA){ $('caTxt').textContent=curto(CA); } else { $('ca').classList.add('vazio'); } if(X_URL) $('xLink').href=X_URL; else $('xLink').style.display='none'; $('ca').onclick=()=>copiar('ca','caTxt',CA); $('wal').onclick=()=>copiar('wal','walTxt',carteira); });
 document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ $('sobre').classList.remove('on'); return; } if($('sobre').classList.contains('on')) return; if(e.key==='c'||e.key==='C'){ $('app').classList.toggle('cinema'); setTimeout(resize,50);} });
 
 async function load(){
