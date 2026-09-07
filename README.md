@@ -284,10 +284,18 @@ pedaços novos:
   recebem o mesmo protocolo da página local (a página não muda). Cada espectador tem fila de 6: quem atrasa
   perde quadro, não acumula. O relay devolve `{"viewers": n}` e o número entra no campo `viewers` dos quadros.
   Sem `/dev`, sem estímulo pelo público. `/health` mostra se a fonte está ligada.
+- **Domínio (07/09): `flybrain.finance`** (Michel comprou; ele escreveu "flybrian" no chat, conferir a grafia no
+  registrador). O `.bat` já aponta `FLY_RELAY_URL=wss://flybrain.finance/fonte` e lê o token de `relay.token`
+  (arquivo na raiz, fora do git, gerado com `secrets.token_urlsafe(36)`). Os meta tags de compartilhamento
+  (og:*, twitter:*), o canonical e a imagem `site/og.png` (`brain/gerar_og.py`: nuvem real dos neurônios + marca,
+  1200×630) usam esse domínio; se o domínio for outro, trocar nos meta tags de `publico.html`, no `gerar_og.py`
+  e no `.bat`.
 - **Subir no Railway:** novo serviço a partir do repo `ojotunn/flybrain` (raiz; o Procfile é detectado),
-  variável `FLY_RELAY_TOKEN` com um segredo longo, gerar domínio. No PC, no `START-Windows.bat`, descomentar
-  `FLY_RELAY_URL=wss://<dominio>/fonte` e `FLY_RELAY_TOKEN` (o mesmo). Testado ponta a ponta com o relay local
-  na porta 8436 (`FLY_RELAY_TOKEN=teste-local PORT=8436 py\Scripts\python.exe relay\servidor.py`).
+  variável `FLY_RELAY_TOKEN` = conteúdo de `relay.token`. Settings → Networking → Custom Domain:
+  `flybrain.finance` (e `www.flybrain.finance`); o Railway mostra o alvo do CNAME. No registrador: `www` CNAME →
+  alvo; para a raiz (apex) o DNS precisa de ALIAS/ANAME ou CNAME flattening (Cloudflare gratuito resolve; o
+  proxy laranja da Cloudflare passa WebSocket normalmente). Testado ponta a ponta com o relay local na porta
+  8436 (`FLY_RELAY_TOKEN=teste-local PORT=8436 py\Scripts\python.exe relay\servidor.py`).
 - **Página:** carteira dela na barra do topo (copiar) e em números grandes no painel; ABOUT abre a descrição da
   tecnologia (cérebro, corpo, mapa do mercado, regras das ordens, o que não existe, créditos).
 

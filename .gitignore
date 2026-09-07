@@ -6,3 +6,4 @@ __pycache__/
 mercado/carteira.json
 mercado/carteira.senha
 *.log
+relay.token
