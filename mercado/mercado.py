@@ -83,6 +83,20 @@ def ignorados():
     return lista
 
 
+ORDENS_ARQ = Path(__file__).resolve().parent / 'ordens.txt'     # 'on' | 'off': liga/desliga as ordens sem reiniciar
+
+
+def ordens_ativas():
+    """Interruptor das ordens (sentidos e tela continuam): FLY_MERCADO_ORDENS (padrao on) ou mercado/ordens.txt.
+    Fica em off ate o token dela ser lancado (pedido do Michel, 07/09)."""
+    v = os.environ.get('FLY_MERCADO_ORDENS', 'on').strip().lower()
+    if ORDENS_ARQ.exists():
+        t = ORDENS_ARQ.read_text().strip().lower()
+        if t:
+            v = t.split()[0]
+    return v not in ('off', '0', 'nao', 'no', 'false', 'desligado')
+
+
 def proibido(c):
     ign = ignorados()
     return (c.get('token') or '').lower() in ign or (c.get('pool') or '').lower() in ign
@@ -387,6 +401,7 @@ def main():
     ultima_escolha = 0.0
     ultima_carteira = 0.0
     ultima_curva = 0.0
+    ativas = None                          # estado do interruptor das ordens (card quando muda)
     vistos = set()
     historico = deque(maxlen=600)          # trades ja lidos (para replay)
     precos = deque(maxlen=60)              # (t, preco_eth) para a tendencia
@@ -570,6 +585,15 @@ def main():
                       'tx': t['tx'], 'estimulo': nome, 'ms': round(lista[0][1]), 'extra': ' + '.join(extras) or None,
                       'replay': True, 'quando': t['quando']})
 
+        # ----- interruptor das ordens (relido a cada volta; muda sem reiniciar) -----
+        agora_ativas = ordens_ativas()
+        if agora_ativas != ativas:
+            ativas = agora_ativas
+            print(f'[mercado] ordens {"LIGADAS" if ativas else "DESLIGADAS"}', flush=True)
+            publicar({'classe': 'info', 'texto': 'orders are ON: her reflexes now place real orders' if ativas
+                      else 'orders are paused until the token launches · she still feels every trade'})
+        if not ativas:
+            acima_desde.clear()            # sem cronometro acumulado: quando ligar, comeca do zero
         # ----- reflexo -> ordem (regras fixas sobre as barras dos grupos motores) -----
         dn = estado.get('dn', {})
         fresco = agora - estado.get('dn_t', 0) < 5
@@ -584,7 +608,7 @@ def main():
             acima_desde.setdefault('amargo', agora)
         else:
             acima_desde.pop('amargo', None)
-        if preco > 0 and agora - ultima_ordem >= INTERVALO_ORDEM:
+        if ativas and preco > 0 and agora - ultima_ordem >= INTERVALO_ORDEM:
             if 'compra' in acima_desde and agora - acima_desde['compra'] >= REGRAS['compra']['segundos']:
                 dur = agora - acima_desde['compra']
                 lote = max(ORDEM_MIN, carteira.disponivel() * ORDEM_FRACAO)
@@ -635,6 +659,7 @@ def main():
                       'valor_usd': round(valor * eth_usd, 2), 'max_ordem_usd': MAX_ORDEM_USD,
                       'pnl_usd': round((valor - carteira.eth0) * eth_usd, 2),
                       'endereco': carteira.endereco, 'reserva_gas_eth': RESERVA_GAS_ETH if MODO == 'real' else 0,
+                      'ordens_ativas': bool(ativas),
                       'quieto_s': round(agora - ultimo_trade_real), 'replay': REPLAY and agora - ultimo_trade_real > 90})
         time.sleep(1.0)
 
