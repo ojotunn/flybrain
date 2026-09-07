@@ -1,0 +1,307 @@
+# Servidor da mosca: sobe o cerebro na placa, serve o site e transmite os quadros por WebSocket.
+# Protocolo do quadro (binario): [uint32 tamanho do JSON][JSON][uint32 x N indices que dispararam]
+# Mensagens do cliente (texto JSON): {"estimulo": "sugar", "ms": 500}
+import asyncio
+import json
+import os
+import struct
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+from aiohttp import web
+
+RAIZ = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from motor import Cerebro, ESTIMULOS_BLOQUEADOS  # noqa: E402
+
+PORTA = int(os.environ.get('FLY_PORT', '8435'))
+AMBIENTE_HZ = float(os.environ.get('FLY_AMBIENTE_HZ', '0'))   # 0: ruido difuso prende a rede em crise
+PLASTICIDADE = os.environ.get('FLY_PLASTICIDADE', '1') != '0'
+MAX_IDX = int(os.environ.get('FLY_MAX_IDX', '4000'))   # teto de indices por quadro enviado
+ROT_RAD_S = float(os.environ.get('FLY_ROT_RAD_S', '0.12'))   # relogio de rotacao compartilhado: cerebro na pagina e camera do corpo
+SITE = RAIZ / 'site'
+DADOS = RAIZ / 'brain' / 'data'
+
+
+def empacotar(cab, idx):
+    j = json.dumps(cab, separators=(',', ':')).encode('utf-8')
+    return struct.pack('<I', len(j)) + j + idx.astype('<u4').tobytes()
+
+
+async def transmitir(app):
+    cerebro = app['cerebro']
+    clientes = app['clientes']
+    ultimo_t = time.time()
+    rng = np.random.default_rng()
+    while True:
+        await asyncio.sleep(0.02)
+        q = None
+        while True:      # fica com o quadro mais recente; descarta atrasados
+            try:
+                q = cerebro.fila.get_nowait()
+            except Exception:
+                break
+        if q is None:
+            continue
+        agora = time.time()
+        idx = q['idx']
+        idx_total = int(len(idx))
+        if idx_total > MAX_IDX:
+            idx = rng.choice(idx, MAX_IDX, replace=False)
+        pps = q['passos_por_s'] or 0.0
+        cab = {
+            'tipo': 'quadro',
+            't': round(q['t_cerebro'], 3),
+            'lived': round(q['vivo_s'], 3),
+            'brain_ms': round(q['seg_cerebro'] * 1000, 2),
+            'wall_ms': round((agora - ultimo_t) * 1000, 1),
+            'steps_per_s': round(pps, 1),
+            'ratio': round(10000.0 / pps, 1) if pps > 0 else None,   # s de maquina por s de cerebro
+            'spikes': int(q['total']),
+            'spikes_per_s': round(q['total'] / q['seg_cerebro'], 1) if q['seg_cerebro'] > 0 else 0,
+            'regions': q['regioes'],
+            'dn': {k: round(v, 1) for k, v in q['dn'].items()},
+            'stimuli': q['ativos'],
+            'viewers': len(clientes),
+            'synapses_changed': q['sinapses_mudadas'],
+            'idx_total': idx_total,
+            'state': q['estado'],
+            'seizures': q['crises'],
+            'body_age': round(agora - app['estado']['corpo'][0]['recebido'], 1) if app['estado'].get('corpo') else None,
+            'body_cfg': app['estado']['corpo_cfg'],
+            'rot': round(((agora - app['estado']['t0']) * ROT_RAD_S) % 6.283185307, 4),   # angulo comum (rad)
+            'rot_speed': ROT_RAD_S,
+        }
+        ultimo_t = agora
+        app['estado']['ultimo'] = cab
+        if not clientes:
+            continue
+        dados = empacotar(cab, idx)
+        mortos = []
+        for ws in list(clientes):
+            try:
+                await ws.send_bytes(dados)
+            except Exception:
+                mortos.append(ws)
+        for ws in mortos:
+            clientes.discard(ws)
+
+
+async def ws_handler(request):
+    app = request.app
+    ws = web.WebSocketResponse(heartbeat=20)
+    await ws.prepare(request)
+    app['clientes'].add(ws)
+    if request.query.get('papel') in ('corpo', 'mercado'):   # processos que so leem taxas: sem quadros do corpo
+        app['sem_corpo'].add(ws)
+    cerebro = app['cerebro']
+    await ws.send_str(json.dumps({
+        'tipo': 'ola', 'n': cerebro.n, 'synapses': cerebro.n_sinapses, 'device': cerebro.device,
+        'stimuli': {k: {'rate': cerebro.stim_rate[k], 'neurons': int(len(v)),
+                        'description': cerebro.stim_desc[k]} for k, v in cerebro.stim_idx.items()
+                    if k not in ESTIMULOS_BLOQUEADOS},
+        'groups': list(cerebro.grupos), 'born': cerebro.nascimento,
+        'plasticity': cerebro.plasticidade, 'ambient_hz': cerebro.ambiente_hz,
+    }))
+    if app['estado'].get('corpo') and ws not in app['sem_corpo']:
+        cab, dados = app['estado']['corpo']
+        await ws.send_bytes(empacotar_bytes(cab, dados))
+    if ws not in app['sem_corpo']:
+        if app['estado'].get('mercado_resumo'):
+            await ws.send_str(json.dumps(app['estado']['mercado_resumo'], separators=(',', ':')))
+        for ev in list(app['estado']['mercado_eventos'])[-12:]:
+            await ws.send_str(json.dumps(ev, separators=(',', ':')))
+    try:
+        async for msg in ws:
+            if msg.type != web.WSMsgType.TEXT:
+                continue
+            try:
+                m = json.loads(msg.data)
+            except Exception:
+                continue
+            if 'estimulo' in m:
+                ok = cerebro.estimular(str(m['estimulo']), m.get('ms', 500), origem='site')
+                await ws.send_str(json.dumps({'tipo': 'ack', 'estimulo': m['estimulo'], 'ok': ok}))
+            if 'corpo_tempo' in m:          # escala de tempo do corpo (dev): vai no cabecalho de cada quadro
+                try:
+                    app['estado']['corpo_cfg']['time_scale'] = max(0.1, min(2.0, float(m['corpo_tempo'])))
+                except (TypeError, ValueError):
+                    pass
+    finally:
+        app['clientes'].discard(ws)
+        app['sem_corpo'].discard(ws)
+    return ws
+
+
+async def api_estado(request):
+    return web.json_response(request.app['estado']['ultimo'] or {'tipo': 'aquecendo'})
+
+
+async def espalhar_corpo(app, cab, dados):
+    """Guarda o quadro do corpo e repassa a todos os espectadores."""
+    cab['tipo'] = 'corpo'
+    cab['recebido'] = time.time()
+    app['estado']['corpo'] = (cab, dados)
+    app['estado']['corpo_n'] = app['estado'].get('corpo_n', 0) + 1
+    pacote = empacotar_bytes(cab, dados)
+    for ws in list(app['clientes']):
+        if ws in app['sem_corpo']:
+            continue
+        try:
+            await ws.send_bytes(pacote)
+        except Exception:
+            app['clientes'].discard(ws)
+
+
+async def corpo_quadro(request):
+    """Recebe um quadro JPEG do corpo por HTTP (caminho antigo; o corpo usa /corpo/ws)."""
+    dados = await request.read()
+    try:
+        cab = json.loads(request.headers.get('X-Corpo', '{}'))
+    except Exception:
+        cab = {}
+    await espalhar_corpo(request.app, cab, dados)
+    return web.json_response({'ok': True, 'viewers': len(request.app['clientes'])})
+
+
+async def corpo_ws(request):
+    """WebSocket persistente do corpo: cada mensagem binaria e [uint32 tamanho][JSON][JPEG]."""
+    ws = web.WebSocketResponse(max_msg_size=8 * 1024 * 1024, heartbeat=20)
+    await ws.prepare(request)
+    app = request.app
+    print('[servidor] corpo conectado por WebSocket', flush=True)
+    try:
+        async for msg in ws:
+            if msg.type != web.WSMsgType.BINARY:
+                continue
+            dados = msg.data
+            n = struct.unpack_from('<I', dados, 0)[0]
+            try:
+                cab = json.loads(dados[4:4 + n].decode('utf-8'))
+            except Exception:
+                cab = {}
+            await espalhar_corpo(app, cab, dados[4 + n:])
+    finally:
+        print('[servidor] corpo desconectado', flush=True)
+    return ws
+
+
+async def corpo_ultimo(request):
+    """Ultimo quadro do corpo como JPEG (para clipes, posts e conferencia)."""
+    c = request.app['estado'].get('corpo')
+    if not c:
+        raise web.HTTPNotFound(text='sem quadro do corpo ainda')
+    return web.Response(body=c[1], content_type='image/jpeg', headers={'Cache-Control': 'no-store'})
+
+
+def empacotar_bytes(cab, dados):
+    j = json.dumps(cab, separators=(',', ':')).encode('utf-8')
+    return struct.pack('<I', len(j)) + j + dados
+
+
+async def api_estimulo(request):
+    m = await request.json()
+    ok = request.app['cerebro'].estimular(str(m.get('estimulo', '')), m.get('ms', 500), origem='api')
+    return web.json_response({'ok': ok})
+
+
+async def api_eventos(request):
+    return web.json_response(list(request.app['cerebro'].eventos)[-50:])
+
+
+async def api_mercado(request):
+    """Canal do mercado (mercado/mercado.py): POST guarda e espalha um evento (trade lido, estimulo mandado,
+    ordem em papel/real, resumo); GET devolve o resumo e os ultimos eventos para a pagina."""
+    app = request.app
+    if request.method == 'POST':
+        ev = await request.json()
+        ev['tipo'] = 'mercado'
+        ev['t'] = time.time()
+        if ev.get('classe') == 'resumo':
+            app['estado']['mercado_resumo'] = ev
+        else:
+            app['estado']['mercado_eventos'].append(ev)
+        pacote = json.dumps(ev, separators=(',', ':'))
+        for ws in list(app['clientes']):
+            if ws in app['sem_corpo']:
+                continue
+            try:
+                await ws.send_str(pacote)
+            except Exception:
+                app['clientes'].discard(ws)
+        return web.json_response({'ok': True})
+    return web.json_response({'resumo': app['estado'].get('mercado_resumo'),
+                              'eventos': list(app['estado']['mercado_eventos'])[-40:]})
+
+
+async def index(request):
+    """Pagina publica (espectador). A de desenvolvimento, com os botoes, fica em /dev."""
+    arq = SITE / 'publico.html'
+    if not arq.exists():
+        arq = SITE / 'index.html'
+    return web.FileResponse(arq, headers={'Cache-Control': 'no-store'})
+
+
+async def dev(request):
+    return web.FileResponse(SITE / 'index.html', headers={'Cache-Control': 'no-store'})
+
+
+async def ao_iniciar(app):
+    app['tarefa'] = asyncio.create_task(transmitir(app))
+
+
+async def ao_encerrar(app):
+    app['tarefa'].cancel()
+    app['cerebro'].parar()
+    print('[servidor] cerebro salvo e parado')
+
+
+def reservar_cpu():
+    """Nucleos proprios para o cerebro, separados dos do corpo (corpo/corpo.py usa 0xFF00). 0 desliga."""
+    if os.name != 'nt':
+        return
+    import ctypes
+    mascara = int(os.environ.get('FLY_CEREBRO_AFINIDADE', '0x00FF'), 0)
+    if mascara:
+        k32 = ctypes.windll.kernel32
+        k32.SetProcessAffinityMask(k32.GetCurrentProcess(), mascara)
+
+
+def main():
+    reservar_cpu()
+    cerebro = Cerebro(
+        dir_dados=DADOS / 'flywire', dir_estado=DADOS / 'estado',
+        meta_parquet=DADOS / 'neuronios.parquet',
+        plasticidade=PLASTICIDADE, ambiente_hz=AMBIENTE_HZ,
+    )
+    cerebro.iniciar()
+    app = web.Application(client_max_size=4 * 1024 * 1024)
+    app['cerebro'] = cerebro
+    app['clientes'] = set()
+    app['sem_corpo'] = set()           # conexoes que nao recebem os quadros do corpo (o proprio corpo)
+    from collections import deque
+    app['estado'] = {'ultimo': None, 'corpo_cfg': {}, 't0': time.time(),   # dict mutavel (o app nao aceita chaves novas depois)
+                     'mercado_resumo': None, 'mercado_eventos': deque(maxlen=200)}
+    app.router.add_get('/', index)
+    app.router.add_get('/dev', dev)
+    app.router.add_get('/ws', ws_handler)
+    app.router.add_get('/api/estado', api_estado)
+    app.router.add_get('/api/eventos', api_eventos)
+    app.router.add_get('/api/mercado', api_mercado)
+    app.router.add_post('/api/mercado', api_mercado)
+    app.router.add_post('/api/estimulo', api_estimulo)
+    app.router.add_post('/corpo/quadro', corpo_quadro)
+    app.router.add_get('/corpo/ws', corpo_ws)
+    app.router.add_get('/corpo/ultimo.jpg', corpo_ultimo)
+    app.router.add_static('/static', SITE, show_index=False)
+    app.on_startup.append(ao_iniciar)
+    app.on_shutdown.append(ao_encerrar)
+    print(f'[servidor] http://localhost:{PORTA}  (ambiente {AMBIENTE_HZ} Hz, plasticidade {PLASTICIDADE})',
+          flush=True)
+    web.run_app(app, host='0.0.0.0', port=PORTA, print=None)
+
+
+if __name__ == '__main__':
+    main()

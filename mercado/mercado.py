@@ -1,0 +1,614 @@
+# Mercado -> sentidos -> cerebro -> reflexo -> ordem. Modo PAPEL (saldo virtual), so na Pons.
+#
+# Leitor: a cada INTERVALO s pega os trades novos do token de maior volume da Pons V2 (GeckoTerminal) e traduz
+# cada um em estimulo por uma tabela fixa e publica (compra = acucar, venda = amargo, venda grande = sombra,
+# muita transacao = vibracao, preco subindo firme = impulso de andar). Nao decide nada.
+# Tradutor de reflexo: le as taxas dos grupos motores do cerebro (as barras da tela) e aplica regras fixas:
+# proboscide alta por um tempo compra; fuga ou re vende tudo; o resto segura. Intervalo minimo entre ordens.
+# Sem agente, sem IA de linguagem: dado o mesmo mercado e o mesmo cerebro, sai a mesma ordem.
+import asyncio
+import json
+import math
+import os
+import struct
+import sys
+import threading
+import time
+import urllib.request
+from collections import deque
+
+SERVIDOR = os.environ.get('FLY_SERVIDOR', 'http://localhost:8435')
+WS_URL = SERVIDOR.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws?papel=mercado'
+GECKO = 'https://api.geckoterminal.com/api/v2/networks/robinhood'
+INTERVALO = float(os.environ.get('FLY_MERCADO_INTERVALO', '15'))          # s entre leituras da Pons
+POOL = os.environ.get('FLY_MERCADO_POOL', '')                              # vazio: maior volume da Pons V2
+MODO = os.environ.get('FLY_MERCADO_MODO', 'papel')                         # papel | real (carteira dela na Pons)
+RESERVA_GAS_ETH = float(os.environ.get('FLY_MERCADO_RESERVA_GAS', '0.0015'))  # modo real: nunca gasta a reserva de gas
+SLIPPAGE = 0.03                                                            # modo real: minimo aceito = cotacao - 3%
+# Valores em DOLAR (como o Michel pensa), convertidos para ETH pelo preco implicito da Pons na hora:
+SALDO_USD = float(os.environ.get('FLY_MERCADO_SALDO_USD', '100'))          # saldo virtual inicial (se nao houver o em ETH)
+SALDO_ETH = float(os.environ.get('FLY_MERCADO_SALDO_ETH', '0'))            # saldo inicial em ETH; > 0 vence o em dolar (07/09: 0,05)
+MAX_ORDEM_USD = float(os.environ.get('FLY_MERCADO_MAX_ORDEM_USD', '5'))     # teto por ordem (compra e venda); 0 = sem teto
+ORDEM_FRACAO = float(os.environ.get('FLY_MERCADO_ORDEM', '0.05'))          # fracao do saldo por compra
+ORDEM_MIN_USD = 0.50                                                       # abaixo disso nao compra
+SALDO0 = 0.0                                                               # em ETH, definido na primeira leitura de preco
+MAX_ORDEM_ETH = 0.0
+ORDEM_MIN = 0.0
+VENDA_AMARGO_FRACAO = 0.25                                                 # regra de ponte: amargo vende 25% do que tem
+INTERVALO_ORDEM = float(os.environ.get('FLY_MERCADO_INTERVALO_ORDEM', '20'))   # s entre ordens
+REPLAY = os.environ.get('FLY_MERCADO_REPLAY', '1') != '0'                  # mercado quieto: reprisa trades antigos
+TAXA = 0.01                                                                # taxa da curva (1%), so para o papel
+
+# regras do reflexo -> ordem (Hz das barras da tela; tempo em segundos de relogio)
+REGRAS = {
+    'compra': {'grupo': 'feed', 'hz': 30.0, 'segundos': 2.0},
+    'venda_fuga': {'grupo': 'escape', 'hz': 40.0, 'segundos': 0.5},
+    'venda_re': {'grupo': 'backward', 'hz': 30.0, 'segundos': 0.5},
+}
+# Regra de ponte (declarada, como o "bitter_escape" do fly-brain): o amargo acende o cerebro mas nao chega
+# aos motores lidos; se o amargo ficar ativo por AMARGO_S segundos de relogio e ela tiver tokens, vende
+# VENDA_AMARGO_FRACAO do que tem. Na noite de 06/09 ela comprou tudo e nunca vendeu por falta disto.
+AMARGO_S = 6.0
+
+
+def http_json(url, dados=None, timeout=20):
+    req = urllib.request.Request(url, data=json.dumps(dados).encode() if dados is not None else None,
+                                 headers={'User-Agent': 'fly-mercado/1.0', 'Accept': 'application/json',
+                                          'Content-Type': 'application/json'})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode('utf-8'))
+
+
+def gecko(caminho):
+    try:
+        return http_json(GECKO + caminho)
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            time.sleep(30)
+        return None
+    except Exception:
+        return None
+
+
+def _token_de(item):
+    """Endereco do token base de um item da GeckoTerminal (id vem como 'robinhood_0x...')."""
+    base = (((item.get('relationships') or {}).get('base_token') or {}).get('data') or {}).get('id', '')
+    return base.split('_')[-1] if base else ''
+
+
+def listar_pools():
+    """Curvas da Pons V2 por volume de 24 h, as mais movimentadas primeiro, com o endereco do token."""
+    d = gecko('/dexes/pons-v2/pools?sort=h24_volume_usd_desc&page=1')
+    if not d or not d.get('data'):
+        return []
+    return [{'pool': p['attributes']['address'], 'nome': p['attributes']['name'].split(' / ')[0],
+             'par': p['attributes']['name'], 'token': _token_de(p)} for p in d['data'][:8]]
+
+
+def ler_pool(pool):
+    d = gecko(f'/pools/{pool}')
+    if not d or not d.get('data'):
+        return None
+    a = d['data']['attributes']
+    return {'preco_eth': float(a.get('base_token_price_native_currency') or 0),
+            'preco_usd': float(a.get('base_token_price_usd') or 0),
+            'vol_h1': float((a.get('volume_usd') or {}).get('h1') or 0),
+            'vol_h24': float((a.get('volume_usd') or {}).get('h24') or 0),
+            'tx_h1': (a.get('transactions') or {}).get('h1') or {},
+            'token': _token_de(d['data'])}
+
+
+def ler_trades(pool):
+    d = gecko(f'/pools/{pool}/trades')
+    if not d or not d.get('data'):
+        return []
+    ts = []
+    for t in d['data']:
+        a = t['attributes']
+        ts.append({'tx': a['tx_hash'], 'kind': a['kind'], 'usd': float(a.get('volume_in_usd') or 0),
+                   'de': a.get('tx_from_address') or '', 'quando': a['block_timestamp'],
+                   'preco_usd': float(a.get('price_to_in_usd' if a['kind'] == 'buy' else 'price_from_in_usd') or 0)})
+    ts.sort(key=lambda x: x['quando'])
+    return ts
+
+
+def ms_por_valor(usd):
+    """Duracao do estimulo em ms de cerebro: 150 ms para centavos, ~1,1 s para $100, teto 2,5 s."""
+    return float(max(150.0, min(2500.0, 150.0 + 320.0 * math.log10(1.0 + max(0.0, usd)))))
+
+
+def limiares(historico):
+    """p50 e p90 do valor em dolar dos trades recentes: 'grande' e relativo ao token, nao um numero fixo."""
+    v = sorted(t['usd'] for t in historico if t['usd'] > 0)
+    if len(v) < 10:
+        return 20.0, 100.0
+    return v[len(v) // 2], v[int(len(v) * 0.9)]
+
+
+def traduzir_trade(t, p50, p90, novo_holder):
+    """Mapa publico mercado -> sentidos. Devolve lista de (estimulo, ms) e um rotulo curto para o card.
+    compra = acucar (duracao pelo valor); compra grande ou holder novo = + dopamina;
+    venda = amargo; venda media = + empurrao de re; venda grande = + sombra."""
+    ms = ms_por_valor(t['usd'])
+    if t['kind'] == 'buy':
+        lista = [('sugar', ms)]
+        extras = []
+        if t['usd'] >= p90:
+            lista.append(('reward', 500.0)); extras.append('big buy → dopamine')
+        elif novo_holder:
+            lista.append(('reward', 300.0)); extras.append('new holder → dopamine')
+        return lista, 'sugar', extras
+    lista = [('bitter', ms)]
+    extras = []
+    if t['usd'] >= p90:
+        lista.append(('lc4', 400.0)); extras.append('big sell → shadow')
+    elif t['usd'] >= p50:
+        lista.append(('mdn', 300.0)); extras.append('sell → backs away')
+    return lista, 'bitter', extras
+
+
+def estimular(nome, ms):
+    try:
+        http_json(SERVIDOR + '/api/estimulo', {'estimulo': nome, 'ms': ms}, timeout=5)
+        return True
+    except Exception:
+        return False
+
+
+def publicar(ev):
+    try:
+        http_json(SERVIDOR + '/api/mercado', ev, timeout=5)
+    except Exception:
+        pass
+
+
+# ----- leitura das taxas do cerebro (thread) -----
+def leitor_ws(estado):
+    import websockets
+
+    async def laco():
+        while True:
+            try:
+                async with websockets.connect(WS_URL, max_size=8_000_000) as ws:
+                    estado['ligado'] = True
+                    async for msg in ws:
+                        if isinstance(msg, (bytes, bytearray)):
+                            n = struct.unpack_from('<I', msg, 0)[0]
+                            cab = json.loads(bytes(msg[4:4 + n]).decode('utf-8'))
+                            if cab.get('tipo') == 'quadro':
+                                estado['dn'] = cab.get('dn', {})
+                                estado['estimulos'] = cab.get('stimuli', [])
+                                estado['cerebro_estado'] = cab.get('state')
+                                estado['dn_t'] = time.time()
+            except Exception as e:
+                estado['ligado'] = False
+                estado['erro'] = str(e)[:80]
+                await asyncio.sleep(2)
+
+    asyncio.run(laco())
+
+
+class Carteira:
+    """Saldo virtual. Compra e venda a preco da curva com a taxa de 1%."""
+
+    def __init__(self, eth):
+        self.eth0 = eth
+        self.eth = eth
+        self.tokens = 0.0
+        self.ordens = 0
+        self.endereco = ''
+        self.ultima_tx = ''
+        self.eventos = []
+
+    def disponivel(self):
+        return self.eth
+
+    def comprar(self, eth, preco):
+        if eth <= 0 or preco <= 0 or self.eth < eth:
+            return False
+        self.eth -= eth
+        self.tokens += eth * (1 - TAXA) / preco
+        self.ordens += 1
+        return True
+
+    def vender(self, preco, fracao=1.0):
+        if self.tokens <= 0 or preco <= 0:
+            return 0.0
+        qtd = self.tokens * max(0.0, min(1.0, fracao))
+        if MAX_ORDEM_ETH > 0:
+            qtd = min(qtd, MAX_ORDEM_ETH / preco)      # teto por ordem, em ETH equivalente
+        recebido = qtd * preco * (1 - TAXA)
+        self.eth += recebido
+        self.tokens -= qtd
+        self.ordens += 1
+        return recebido
+
+    def vender_tudo(self, preco):
+        return self.vender(preco, 1.0)
+
+    def valor(self, preco):
+        return self.eth + self.tokens * preco
+
+
+class CarteiraReal:
+    """Carteira dela na Robinhood Chain: saldo lido da chain, compra e venda na curva da Pons V2 (mercado/pons.py).
+    Mesma interface da Carteira de papel. Nao tem funcao de saque: daqui so sai compra e venda na curva."""
+
+    def __init__(self, chain, conta):
+        self.chain = chain
+        self.conta = conta
+        self.endereco = conta.address
+        self.token = None
+        self.curva = None
+        self.decimais = 18
+        self.eth = chain.saldo_eth(self.endereco)
+        self.eth0 = self.eth                  # base do PnL; depositos e saques do Michel movem esta base
+        self.esperado = self.eth              # saldo que a ultima leitura/ordem deixou; diferenca = deposito ou saque
+        self.tokens_raw = 0
+        self.tokens = 0.0
+        self.ordens = 0
+        self.ultima_tx = ''
+        self.erro_ate = 0.0                   # depois de uma falha, espera 2 min antes de tentar de novo
+        self.eventos = []                     # (tipo, dado) que o laco principal publica como card
+
+    def usar_token(self, token):
+        """Adota o token se a curva dele estiver ativa (fase 0). Graduado ou desconhecido: False."""
+        if not token:
+            return False
+        try:
+            l = self.chain.lancamento(token)
+            if not l['na_curva']:
+                return False
+            self.token, self.curva = l['token'], l['curva']
+            self.decimais = int(self.chain.erc20(self.token).functions.decimals().call())
+            self.atualizar()
+            return True
+        except Exception as e:
+            self.eventos.append(('error', f'could not read {token[:10]} on chain: {str(e)[:60]}'))
+            return False
+
+    def ainda_na_curva(self):
+        try:
+            return self.chain.lancamento(self.token)['na_curva']
+        except Exception:
+            return True
+
+    def largar_token(self):
+        self.token = self.curva = None
+        self.tokens_raw, self.tokens = 0, 0.0
+
+    def atualizar(self):
+        eth = self.chain.saldo_eth(self.endereco)
+        delta = eth - self.esperado
+        if abs(delta) > 1e-6:                 # mexeram na carteira sem ser ordem dela: deposito ou saque do Michel
+            self.eth0 += delta
+            self.eventos.append(('deposit' if delta > 0 else 'withdrawal', delta))
+        self.eth = self.esperado = eth
+        if self.token:
+            self.tokens_raw = int(self.chain.saldo_token(self.token, self.endereco))
+            self.tokens = self.tokens_raw / 10 ** self.decimais
+
+    def _apos_tx(self):
+        antes = self.esperado
+        novo = self.chain.saldo_eth(self.endereco)
+        self.eth = self.esperado = novo
+        self.tokens_raw = int(self.chain.saldo_token(self.token, self.endereco))
+        self.tokens = self.tokens_raw / 10 ** self.decimais
+        return novo - antes                   # compra: -(eth + gas); venda: recebido - gas
+
+    def disponivel(self):
+        return max(0.0, self.eth - RESERVA_GAS_ETH)
+
+    def comprar(self, eth, preco):
+        if not self.curva or eth <= 0 or time.time() < self.erro_ate:
+            return False
+        eth = min(eth, self.disponivel())
+        if eth < ORDEM_MIN * 0.5:
+            return False
+        try:
+            e = self.chain.estado_curva(self.curva, self.endereco)
+            if e['graduated']:
+                raise RuntimeError('curve graduated')
+            wei = int(eth * 1e18)
+            cot = self.chain.cotar_compra(wei, e['R'], e['T'], e['sellable'], e['feeBps'], e['taxBps'], e['snipeBps'])
+            if cot <= 0:
+                raise RuntimeError('zero quote')
+            self.ultima_tx, _ = self.chain.comprar(self.conta, self.curva, eth, int(cot * (1 - SLIPPAGE)))
+        except Exception as ex:
+            self.erro_ate = time.time() + 120
+            self.eventos.append(('error', f'buy failed: {str(ex)[:90]}'))
+            return False
+        self.ordens += 1
+        self._apos_tx()
+        return True
+
+    def vender(self, preco, fracao=1.0):
+        if not self.curva or self.tokens_raw <= 0 or time.time() < self.erro_ate:
+            return 0.0
+        qtd = int(self.tokens_raw * max(0.0, min(1.0, fracao)))
+        if MAX_ORDEM_ETH > 0 and preco > 0:
+            qtd = min(qtd, int(MAX_ORDEM_ETH / preco * 10 ** self.decimais))   # teto por ordem
+        if preco > 0 and (self.tokens_raw - qtd) * preco / 10 ** self.decimais < ORDEM_MIN * 0.5:
+            qtd = self.tokens_raw             # nao deixa poeira: se o resto valeria centavos, vai tudo
+        if qtd <= 0:
+            return 0.0
+        try:
+            e = self.chain.estado_curva(self.curva, self.endereco)
+            if e['graduated']:
+                raise RuntimeError('curve graduated')
+            cot = self.chain.cotar_venda(qtd, e['R'], e['T'], e['feeBps'], e['taxBps'])
+            self.ultima_tx, _ = self.chain.vender(self.conta, self.curva, self.token, qtd, int(cot * (1 - SLIPPAGE)))
+        except Exception as ex:
+            self.erro_ate = time.time() + 120
+            self.eventos.append(('error', f'sell failed: {str(ex)[:90]}'))
+            return 0.0
+        self.ordens += 1
+        return max(0.0, self._apos_tx())
+
+    def vender_tudo(self, preco):
+        return self.vender(preco, 1.0)
+
+    def valor(self, preco):
+        return self.eth + self.tokens * preco
+
+
+def main():
+    global SALDO0, MAX_ORDEM_ETH, ORDEM_MIN
+    sys.stdout.reconfigure(errors='replace')   # nome de token com emoji nao pode derrubar o console cp1252
+    estado = {'dn': {}, 'estimulos': [], 'ligado': False}
+    threading.Thread(target=leitor_ws, args=(estado,), name='ws', daemon=True).start()
+    carteira = None                        # papel: criada na primeira leitura de preco (conversao dolar -> ETH)
+    if MODO == 'real':
+        import carteira as mod_carteira
+        import pons
+        carteira = CarteiraReal(pons.Pons(), mod_carteira.carregar())
+        print(f'[mercado] carteira REAL {carteira.endereco}: {carteira.eth:.5f} ETH; reserva de gas {RESERVA_GAS_ETH} ETH', flush=True)
+    calibrado = False                      # teto e minimo por ordem calculados em ETH na primeira leitura de preco
+    eth_usd = 0.0
+    pool = {'pool': POOL, 'nome': '?', 'par': '?', 'token': ''} if POOL else None
+    ultima_escolha = 0.0
+    ultima_carteira = 0.0
+    ultima_curva = 0.0
+    vistos = set()
+    historico = deque(maxlen=600)          # trades ja lidos (para replay)
+    precos = deque(maxlen=60)              # (t, preco_eth) para a tendencia
+    ultimo_trade_real = time.time()
+    ultima_leitura = 0.0
+    ultimo_resumo = 0.0
+    ultima_ordem = 0.0
+    ultimo_jo = 0.0
+    ultimo_p9 = 0.0
+    ultimo_lc4 = 0.0
+    ultimo_poeira = 0.0
+    ultimo_evento = time.time()
+    enderecos = set()            # carteiras ja vistas (holder novo = primeira compra)
+    enderecos_replay = set()
+    ultimo_estimulo = ('none', 0.0)
+    acima_desde = {}
+    preco = 0.0
+    info = {}
+    replay_fila = deque()
+    prox_replay = 0.0
+    print(f'[mercado] modo {MODO}; lote {ORDEM_FRACAO:.0%} do saldo; teto ${MAX_ORDEM_USD:.0f} por ordem; '
+          f'leitura a cada {INTERVALO:.0f} s', flush=True)
+
+    while True:
+        agora = time.time()
+        # ----- escolha do token: maior volume da Pons V2 -----
+        # (modo real: nao troca enquanto estiver segurando tokens; so adota curva ativa, fase 0)
+        segurando = MODO == 'real' and carteira.tokens_raw > 0
+        if (pool is None or (agora - ultimo_trade_real > 3600 and not POOL and not segurando)) and agora - ultima_escolha > 300:
+            ultima_escolha = agora
+            if POOL:
+                candidatos = [pool if pool.get('token') else dict(pool, token=(ler_pool(POOL) or {}).get('token', ''))]
+            else:
+                candidatos = listar_pools()
+            novo = None
+            for c in candidatos:
+                if MODO == 'real' and not carteira.usar_token(c.get('token')):
+                    continue
+                novo = c
+                break
+            if novo and (pool is None or novo['pool'] != pool['pool'] or not pool.get('token')):
+                pool = novo
+                vistos.clear()
+                print(f'[mercado] token escolhido: {pool["nome"]} ({pool["par"]}) pool {pool["pool"]} token {pool.get("token")}', flush=True)
+                publicar({'classe': 'info', 'texto': f'watching {pool["nome"]} on Pons, the busiest curve right now'})
+        if pool is None:
+            time.sleep(INTERVALO)
+            continue
+
+        # ----- leitura da Pons -----
+        if agora - ultima_leitura >= INTERVALO:
+            ultima_leitura = agora
+            info = ler_pool(pool['pool']) or info
+            if info.get('preco_eth'):
+                preco = info['preco_eth']
+                precos.append((agora, preco))
+                if info.get('preco_usd'):
+                    eth_usd = info['preco_usd'] / preco
+                if not calibrado and eth_usd > 0:
+                    calibrado = True
+                    MAX_ORDEM_ETH = MAX_ORDEM_USD / eth_usd
+                    ORDEM_MIN = ORDEM_MIN_USD / eth_usd
+                    if carteira is None:
+                        carteira = Carteira(SALDO_ETH if SALDO_ETH > 0 else SALDO_USD / eth_usd)
+                    SALDO0 = carteira.eth0
+                    rotulo = 'her wallet on Robinhood Chain' if MODO == 'real' else 'her paper wallet'
+                    print(f'[mercado] ETH a ${eth_usd:,.0f}: saldo {SALDO0:.4f} ETH = ${SALDO0 * eth_usd:.0f}; '
+                          f'teto ${MAX_ORDEM_USD:.0f} = {MAX_ORDEM_ETH:.5f} ETH por ordem', flush=True)
+                    publicar({'classe': 'info', 'texto': f'{rotulo}: {SALDO0:.4f} ETH (${SALDO0 * eth_usd:.0f}), max ${MAX_ORDEM_USD:.0f} per order'})
+            if carteira is None or not calibrado:
+                time.sleep(1.0)
+                continue
+            trades = ler_trades(pool['pool'])
+            novos = [t for t in trades if t['tx'] not in vistos]
+            for t in trades:
+                vistos.add(t['tx'])
+            if len(vistos) > 5000:
+                vistos = set(t['tx'] for t in trades)
+            if not historico and trades:
+                historico.extend(trades)               # primeira leitura: guarda para o replay, sem estimular
+                enderecos.update(t['de'] for t in trades)
+                novos = []
+            if novos:
+                ultimo_evento = agora
+            p50, p90 = limiares(historico)
+            for t in novos:
+                historico.append(t)
+                ultimo_trade_real = agora
+                novo_holder = t['kind'] == 'buy' and t['de'] not in enderecos
+                enderecos.add(t['de'])
+                lista, nome, extras = traduzir_trade(t, p50, p90, novo_holder)
+                for est, ms in lista:
+                    estimular(est, ms)
+                ultimo_estimulo = (f'{t["kind"]} ${t["usd"]:,.2f}', agora)
+                publicar({'classe': 'trade', 'kind': t['kind'], 'usd': round(t['usd'], 2), 'de': t['de'][:10],
+                          'tx': t['tx'], 'estimulo': nome, 'ms': round(lista[0][1]), 'extra': ' + '.join(extras) or None,
+                          'replay': False, 'quando': t['quando']})
+            # muita transacao no ultimo minuto: vibracao (uma vez por minuto); onda de vendas: sombra
+            recentes = [t for t in trades if t['quando'] >= time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(agora - 60))]
+            if len(recentes) >= 6 and agora - ultimo_jo > 60:
+                ultimo_jo = agora
+                estimular('jo', 300.0)
+                publicar({'classe': 'sinal', 'texto': f'{len(recentes)} trades in a minute → vibration', 'estimulo': 'jo'})
+            vendas_min = [t for t in recentes if t['kind'] == 'sell']
+            if len(vendas_min) >= 4 and agora - ultimo_lc4 > 120:
+                ultimo_lc4 = agora
+                estimular('lc4', 500.0)
+                publicar({'classe': 'sinal', 'texto': f'{len(vendas_min)} sells in a minute → shadow', 'estimulo': 'lc4'})
+            # preco em 5 min: subindo firme = impulso de andar; caindo firme = empurrao de re (a cada 2 min)
+            antigos = [p for tt, p in precos if agora - tt >= 300]
+            if antigos and preco > 0 and agora - ultimo_p9 > 120:
+                var = preco / antigos[0] - 1
+                if var >= 0.02:
+                    ultimo_p9 = agora
+                    estimular('p9', 400.0)
+                    publicar({'classe': 'sinal', 'texto': f'price +{var * 100:.1f}% in 5 min → walk drive', 'estimulo': 'p9'})
+                elif var <= -0.02:
+                    ultimo_p9 = agora
+                    estimular('mdn', 400.0)
+                    publicar({'classe': 'sinal', 'texto': f'price {var * 100:.1f}% in 5 min → backs away', 'estimulo': 'mdn'})
+
+        # mercado parado ha 4 min: poeira assenta nos olhos (limpeza), a cada 4 min
+        if agora - ultimo_evento > 240 and agora - ultimo_poeira > 240:
+            ultimo_poeira = agora
+            estimular('eye_touch', 400.0)
+            publicar({'classe': 'sinal', 'texto': 'nothing for 4 min → dust on her eyes', 'estimulo': 'eye_touch'})
+
+        if carteira is None or not calibrado:
+            time.sleep(1.0)
+            continue
+        # ----- modo real: saldo na chain a cada 30 s (deposito do Michel vira card); curva a cada 5 min -----
+        if MODO == 'real' and agora - ultima_carteira >= 30:
+            ultima_carteira = agora
+            try:
+                carteira.atualizar()
+            except Exception as e:
+                print(f'[mercado] leitura da chain falhou: {str(e)[:80]}', flush=True)
+            if agora - ultima_curva >= 300:
+                ultima_curva = agora
+                if carteira.token and not carteira.ainda_na_curva():
+                    publicar({'classe': 'info', 'texto': f'{pool["nome"]} graduated off the curve · she moves on'})
+                    print(f'[mercado] {pool["nome"]} graduou; trocando de token', flush=True)
+                    carteira.largar_token()
+                    pool = None
+                    ultima_escolha = 0.0
+                    continue
+            for tipo, dado in carteira.eventos:
+                if tipo == 'deposit':
+                    publicar({'classe': 'info', 'texto': f'wallet topped up: +{dado:.4f} ETH (${dado * eth_usd:.2f})'})
+                elif tipo == 'withdrawal':
+                    publicar({'classe': 'info', 'texto': f'{-dado:.4f} ETH left her wallet (${-dado * eth_usd:.2f})'})
+                else:
+                    publicar({'classe': 'info', 'texto': str(dado)})
+                print(f'[mercado] {tipo}: {dado}', flush=True)
+            carteira.eventos.clear()
+        # ----- mercado quieto: replay de trades antigos, marcado como replay -----
+        if REPLAY and historico and agora - ultimo_trade_real > 90 and agora >= prox_replay:
+            prox_replay = agora + 8.0
+            if not replay_fila:
+                replay_fila.extend(list(historico))      # historico inteiro, na ordem em que aconteceu
+            t = replay_fila.popleft()
+            p50, p90 = limiares(historico)
+            lista, nome, extras = traduzir_trade(t, p50, p90, t['de'] not in enderecos_replay)
+            enderecos_replay.add(t['de'])
+            for est, ms in lista:
+                estimular(est, ms)
+            ultimo_estimulo = (f'replay {t["kind"]} ${t["usd"]:,.2f}', agora)
+            ultimo_evento = agora
+            publicar({'classe': 'trade', 'kind': t['kind'], 'usd': round(t['usd'], 2), 'de': t['de'][:10],
+                      'tx': t['tx'], 'estimulo': nome, 'ms': round(lista[0][1]), 'extra': ' + '.join(extras) or None,
+                      'replay': True, 'quando': t['quando']})
+
+        # ----- reflexo -> ordem (regras fixas sobre as barras dos grupos motores) -----
+        dn = estado.get('dn', {})
+        fresco = agora - estado.get('dn_t', 0) < 5
+        for nome_regra, r in REGRAS.items():
+            hz = float(dn.get(r['grupo'], 0.0)) if fresco else 0.0
+            if hz >= r['hz']:
+                acima_desde.setdefault(nome_regra, agora)
+            else:
+                acima_desde.pop(nome_regra, None)
+        # amargo ativo (regra de ponte): conta o tempo de relogio com 'bitter' na lista de estimulos ativos
+        if fresco and 'bitter' in (estado.get('estimulos') or []):
+            acima_desde.setdefault('amargo', agora)
+        else:
+            acima_desde.pop('amargo', None)
+        if preco > 0 and agora - ultima_ordem >= INTERVALO_ORDEM:
+            if 'compra' in acima_desde and agora - acima_desde['compra'] >= REGRAS['compra']['segundos']:
+                dur = agora - acima_desde['compra']
+                lote = max(ORDEM_MIN, carteira.disponivel() * ORDEM_FRACAO)
+                if MAX_ORDEM_ETH > 0:
+                    lote = min(lote, MAX_ORDEM_ETH)
+                if carteira.comprar(lote, preco):
+                    ultima_ordem = agora
+                    acima_desde.pop('compra', None)
+                    publicar({'classe': 'ordem', 'lado': 'buy', 'eth': round(lote, 6), 'preco_eth': preco, 'modo': MODO,
+                              'motivo': f'proboscis {dn.get("feed", 0):.0f} Hz for {dur:.1f}s after {ultimo_estimulo[0]}',
+                              'tokens': carteira.tokens, 'saldo_eth': carteira.eth, 'tx': carteira.ultima_tx})
+                    print(f'[mercado] COMPRA {MODO} {lote:.5f} ETH @ {preco:.3e} ({dn.get("feed", 0):.0f} Hz por {dur:.1f}s) {carteira.ultima_tx}', flush=True)
+                elif MODO == 'real':
+                    acima_desde.pop('compra', None)       # falhou (card de erro ja saiu); nao insiste no mesmo segundo
+            if 'amargo' in acima_desde and agora - acima_desde['amargo'] >= AMARGO_S and carteira.tokens > 0:
+                recebido = carteira.vender(preco, VENDA_AMARGO_FRACAO)
+                ultima_ordem = agora
+                acima_desde.pop('amargo', None)
+                if recebido > 0:
+                    publicar({'classe': 'ordem', 'lado': 'sell', 'eth': round(recebido, 6), 'preco_eth': preco, 'modo': MODO,
+                              'motivo': f'bitter taste for {AMARGO_S:.0f}s after {ultimo_estimulo[0]} (bridge rule: sells {VENDA_AMARGO_FRACAO:.0%})',
+                              'tokens': carteira.tokens, 'saldo_eth': carteira.eth, 'tx': carteira.ultima_tx})
+                    print(f'[mercado] VENDA {MODO} {VENDA_AMARGO_FRACAO:.0%} -> {recebido:.5f} ETH (amargo) {carteira.ultima_tx}', flush=True)
+            for chave, rotulo in (('venda_fuga', 'escape'), ('venda_re', 'backing up')):
+                if chave in acima_desde and agora - acima_desde[chave] >= REGRAS[chave]['segundos'] and carteira.tokens > 0:
+                    recebido = carteira.vender_tudo(preco)
+                    ultima_ordem = agora
+                    acima_desde.pop(chave, None)
+                    if recebido > 0:
+                        publicar({'classe': 'ordem', 'lado': 'sell', 'eth': round(recebido, 6), 'preco_eth': preco, 'modo': MODO,
+                                  'motivo': f'{rotulo} {dn.get(REGRAS[chave]["grupo"], 0):.0f} Hz after {ultimo_estimulo[0]}',
+                                  'tokens': carteira.tokens, 'saldo_eth': carteira.eth, 'tx': carteira.ultima_tx})
+                        print(f'[mercado] VENDA {MODO} -> {recebido:.5f} ETH ({rotulo}) {carteira.ultima_tx}', flush=True)
+                    break
+
+        # ----- resumo para a pagina -----
+        if agora - ultimo_resumo >= 10:
+            ultimo_resumo = agora
+            valor = carteira.valor(preco)
+            publicar({'classe': 'resumo', 'modo': MODO, 'token': pool['nome'], 'par': pool['par'], 'pool': pool['pool'],
+                      'preco_eth': preco, 'preco_usd': info.get('preco_usd', 0), 'vol_h24': info.get('vol_h24', 0),
+                      'saldo_eth': round(carteira.eth, 6), 'tokens': round(carteira.tokens, 2),
+                      'valor_eth': round(valor, 6), 'pnl_eth': round(valor - carteira.eth0, 6),
+                      'pnl_pct': round((valor / carteira.eth0 - 1) * 100, 2) if carteira.eth0 else 0,
+                      'ordens': carteira.ordens, 'cerebro': estado.get('ligado', False),
+                      'max_ordem_eth': MAX_ORDEM_ETH, 'lote_pct': round(ORDEM_FRACAO * 100),
+                      'eth_usd': round(eth_usd, 2), 'saldo_usd': round(carteira.eth * eth_usd, 2),
+                      'valor_usd': round(valor * eth_usd, 2), 'max_ordem_usd': MAX_ORDEM_USD,
+                      'pnl_usd': round((valor - carteira.eth0) * eth_usd, 2),
+                      'endereco': carteira.endereco, 'reserva_gas_eth': RESERVA_GAS_ETH if MODO == 'real' else 0,
+                      'quieto_s': round(agora - ultimo_trade_real), 'replay': REPLAY and agora - ultimo_trade_real > 90})
+        time.sleep(1.0)
+
+
+if __name__ == '__main__':
+    main()

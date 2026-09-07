@@ -1,0 +1,8 @@
+py/
+brain/data/flywire/
+brain/data/estado/
+__pycache__/
+*.pyc
+mercado/carteira.json
+mercado/carteira.senha
+*.log
