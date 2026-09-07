@@ -302,9 +302,29 @@ pedaços novos:
 - **Página:** carteira dela na barra do topo (copiar) e em números grandes no painel; ABOUT abre a descrição da
   tecnologia (cérebro, corpo, mapa do mercado, regras das ordens, o que não existe, créditos).
 
+## Dia do lançamento (07/09/2026): sentidos ≠ operação, interruptores sem reiniciar
+
+- **O que ela sente e o que ela opera são tokens diferentes.** `mercado/sentidos.txt` (ou `FLY_MERCADO_SENTIDOS`)
+  recebe o endereço do token dela; `mercado/sentidos_chain.py` lê a curva **direto da chain** (`eth_getLogs` na
+  curva a cada 4 s; bloco de 0,1 s) e classifica pela transação: `buy` (seletor `0x59a87bc1`, ETH em `value`)
+  ou `sell` (`0xd04c6983`, `tokensIn` no primeiro argumento × preço da curva). Reação em segundos, sem esperar
+  a GeckoTerminal (minutos). Vazio = sente o token que opera, como antes. Os sinais (vibração, sombra, tendência
+  de preço) e o replay usam o histórico do feed ativo. Relido a cada volta: trocar o arquivo muda ao vivo.
+- **`mercado/ignorar.txt`**: tokens que ela nunca opera (o dela). Se o token que ela olha entrar na lista, larga
+  na hora. **`mercado/ordens.txt`**: `on`/`off` liga e desliga as ordens (sentidos e tela continuam); a página
+  mostra "orders paused until launch". Tudo relido sem reiniciar.
+- **Relay injeta `FLY_CA` e `FLY_X_URL`** (variáveis do serviço) na página: `railway variable set FLY_CA=0x… --service flybrain`
+  redeploya em ~1 min e o CA aparece na barra do topo com botão de copiar.
+- **`POST /api/mercado/limpar`** (local) zera o histórico de cards; o relay zera ao redeployar. Usar no lançamento
+  para o feed recomeçar limpo (os "logs" que o Michel viu eram cards de replay e avisos).
+- **Sequência do lançamento:** (1) CA → `sentidos.txt` e `ignorar.txt`; (2) `railway variable set FLY_CA=… FLY_X_URL=…`;
+  (3) `curl -X POST localhost:8435/api/mercado/limpar`; (4) `ordens.txt` = `on`.
+- Os processos rodam pelo `START-Windows.bat` em janelas próprias (caminhos relativos: para achá-los,
+  filtrar por `corpo.py|mercado.py|servidor.py`). Testado 07/09 com sentidos = ROBIN (chain) e operação em outra curva.
+
 ## Próximos passos
 
-1. Michel cria o serviço no Railway e aponta o `.bat` para ele; domínio próprio.
+1. Domínio raiz `flybrain.finance` no Railway (a CLI recusa; tentar pelo painel ou redirecionar para www).
 2. Troca para o conectoma da Janelia (licença) antes do token com taxa.
 3. Vigia que reinicia os três processos se um cair; adote um neurônio; relatório diário; segunda mosca; mundo
    virtual com manchas de açúcar.
