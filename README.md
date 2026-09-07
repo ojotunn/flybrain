@@ -290,12 +290,15 @@ pedaços novos:
   (og:*, twitter:*), o canonical e a imagem `site/og.png` (`brain/gerar_og.py`: nuvem real dos neurônios + marca,
   1200×630) usam esse domínio; se o domínio for outro, trocar nos meta tags de `publico.html`, no `gerar_og.py`
   e no `.bat`.
-- **Subir no Railway:** novo serviço a partir do repo `ojotunn/flybrain` (raiz; o Procfile é detectado),
-  variável `FLY_RELAY_TOKEN` = conteúdo de `relay.token`. Settings → Networking → Custom Domain:
-  `flybrain.finance` (e `www.flybrain.finance`); o Railway mostra o alvo do CNAME. No registrador: `www` CNAME →
-  alvo; para a raiz (apex) o DNS precisa de ALIAS/ANAME ou CNAME flattening (Cloudflare gratuito resolve; o
-  proxy laranja da Cloudflare passa WebSocket normalmente). Testado ponta a ponta com o relay local na porta
-  8436 (`FLY_RELAY_TOKEN=teste-local PORT=8436 py\Scripts\python.exe relay\servidor.py`).
+- **No Railway (07/09, criado pela CLI):** projeto `flybrain`, serviço `flybrain` ligado ao GitHub
+  `ojotunn/flybrain` (push na main = redeploy), variável `FLY_RELAY_TOKEN` = conteúdo de `relay.token`.
+  URL do serviço: `https://flybrain-production.up.railway.app`. Domínio `www.flybrain.finance` registrado no
+  serviço; a raiz `flybrain.finance` a CLI recusou enquanto o domínio não existia no DNS (adicionar de novo pelo
+  `railway domain flybrain.finance --service flybrain` ou pelo painel). **DNS no registrador:** `www` CNAME →
+  `svl3c17d.up.railway.app` e TXT `_railway-verify.www` com o valor que o `railway domain status` mostra; para a
+  raiz (apex) o DNS precisa de ALIAS/ANAME ou CNAME flattening (Cloudflare gratuito resolve; o proxy laranja
+  passa WebSocket). Testado ponta a ponta com o relay local na porta 8436 e depois no Railway
+  (`/health` com `fonte: true`).
 - **Página:** carteira dela na barra do topo (copiar) e em números grandes no painel; ABOUT abre a descrição da
   tecnologia (cérebro, corpo, mapa do mercado, regras das ordens, o que não existe, créditos).
 
