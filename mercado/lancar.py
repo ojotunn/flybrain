@@ -38,7 +38,16 @@ def main():
     (AQUI / 'ignorar.txt').write_text(f'# lancamento {time.strftime("%Y-%m-%d %H:%M")}: ela nunca opera o proprio token\n{ca}\n')
     print('1-2. sentidos.txt e ignorar.txt =', ca)
     print('3.   pagina:', post('/api/config', {'ca': ca, 'x': x}))
-    print('4.   feed limpo:', post('/api/mercado/limpar', {}))
+    print('4.   feed limpo (PC):', post('/api/mercado/limpar', {}))
+    # o relay guarda a propria lista de cards: limpa la tambem (token de relay.token) e as paginas abertas zeram
+    try:
+        token = (AQUI.parent / 'relay.token').read_text().strip()
+        req = urllib.request.Request(f'https://www.flybrain.finance/fonte/limpar?token={token}', data=b'{}', method='POST',
+                                     headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            print('     feed limpo (relay):', json.loads(r.read().decode('utf-8')))
+    except Exception as e:
+        print('     relay nao limpou:', str(e)[:80])
     (AQUI / 'ordens.txt').write_text('on\n')
     print('5.   ordens LIGADAS')
     time.sleep(12)

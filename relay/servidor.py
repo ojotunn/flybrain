@@ -118,6 +118,16 @@ async def fonte(request):
     return ws
 
 
+async def fonte_limpar(request):
+    """Zera o historico de cards do relay e manda as paginas abertas limparem (lancamento). Exige o token."""
+    app = request.app
+    if not TOKEN or request.query.get('token') != TOKEN:
+        raise web.HTTPForbidden(text='token')
+    app['estado']['eventos'].clear()
+    espalhar(app, 't', json.dumps({'tipo': 'mercado', 'classe': 'limpar', 't': time.time()}, separators=(',', ':')))
+    return web.json_response({'ok': True})
+
+
 async def ws_handler(request):
     """Um espectador: recebe o estado atual e depois tudo o que a fonte manda."""
     app = request.app
@@ -199,6 +209,7 @@ def main():
     app.router.add_get('/', index)
     app.router.add_get('/ws', ws_handler)
     app.router.add_get('/fonte', fonte)
+    app.router.add_post('/fonte/limpar', fonte_limpar)
     app.router.add_get('/api/estado', api_estado)
     app.router.add_get('/api/mercado', api_mercado)
     app.router.add_get('/health', saude)
