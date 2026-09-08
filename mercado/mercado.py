@@ -449,6 +449,7 @@ def main():
     ultima_carteira = 0.0
     ultima_curva = 0.0
     ativas = None                          # estado do interruptor das ordens (card quando muda)
+    ultimo_posicao = 0.0                   # ultimo sinal vindo do token que ela segura
     sent = None                            # feed proprio dos sentidos (SentidosChain) ou None
     sent_cfg = ''
     prox_sent_tentativa = 0.0
@@ -487,6 +488,25 @@ def main():
             ultimo_lc4 = agora
             estimular('lc4', 500.0)
             publicar({'classe': 'sinal', 'texto': f'{len(vendas_min)} sells in a minute → shadow', 'estimulo': 'lc4'})
+
+    def tendencia_posicao(serie):
+        """O token que ela OPERA (e segura): cair 2 % em 5 min = empurrao de re; cair 5 % = sombra (fuga = vende).
+        Regra nova depois do dia 1 (07/09): ela so sentia o token do Michel e ficou sentada em cima do CAB."""
+        nonlocal ultimo_posicao
+        agora = time.time()
+        antigos = [p for tt, p in serie if agora - tt >= 300]
+        atual = serie[-1][1] if serie else 0.0
+        if not antigos or atual <= 0 or agora - ultimo_posicao < 120 or carteira.tokens <= 0:
+            return
+        var = atual / antigos[0] - 1
+        if var <= -0.05:
+            ultimo_posicao = agora
+            estimular('lc4', 500.0)
+            publicar({'classe': 'sinal', 'texto': f'{pool["nome"]}, which she holds, {var * 100:.1f}% in 5 min → shadow', 'estimulo': 'lc4'})
+        elif var <= -0.02:
+            ultimo_posicao = agora
+            estimular('mdn', 400.0)
+            publicar({'classe': 'sinal', 'texto': f'{pool["nome"]}, which she holds, {var * 100:.1f}% in 5 min → backs away', 'estimulo': 'mdn'})
 
     def tendencia(serie):
         """Preco em 5 min: subindo firme = impulso de andar; caindo firme = empurrao de re (a cada 2 min)."""
@@ -605,6 +625,8 @@ def main():
                     novos = []
                 processar(novos, trades)
                 tendencia(precos)
+            else:
+                tendencia_posicao(precos)              # o token que ela segura tambem e sentido (queda = re/sombra)
         # ----- sentidos direto da chain (o token dela): liga/desliga por mercado/sentidos.txt, sem reiniciar -----
         cfg = sentidos_config()
         if calibrado and cfg != sent_cfg and agora >= prox_sent_tentativa:
@@ -707,6 +729,12 @@ def main():
                       else 'orders are paused until the token launches · she still feels every trade'})
         if not ativas:
             acima_desde.clear()            # sem cronometro acumulado: quando ligar, comeca do zero
+        # reprise nao compra (regra do dia 1: um lancamento so tem compras, a reprise so dava acucar e ela comprou
+        # ate acabar o ETH). Com o mercado em silencio ela reage na tela, mas so abre posicao com trade AO VIVO.
+        # Vender continua sempre liberado.
+        em_replay = bool(REPLAY and historico and agora - ultimo_trade_real > 90)
+        if em_replay:
+            acima_desde.pop('compra', None)
         # ----- reflexo -> ordem (regras fixas sobre as barras dos grupos motores) -----
         dn = estado.get('dn', {})
         fresco = agora - estado.get('dn_t', 0) < 5
@@ -722,7 +750,7 @@ def main():
         else:
             acima_desde.pop('amargo', None)
         if ativas and preco > 0 and agora - ultima_ordem >= INTERVALO_ORDEM:
-            if 'compra' in acima_desde and agora - acima_desde['compra'] >= REGRAS['compra']['segundos']:
+            if not em_replay and 'compra' in acima_desde and agora - acima_desde['compra'] >= REGRAS['compra']['segundos']:
                 dur = agora - acima_desde['compra']
                 lote = max(ORDEM_MIN, carteira.disponivel() * ORDEM_FRACAO)
                 if MAX_ORDEM_ETH > 0:
