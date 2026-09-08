@@ -685,7 +685,7 @@ def main():
             ultimo_evento = agora
             publicar({'classe': 'trade', 'kind': t['kind'], 'usd': round(t['usd'], 2), 'de': t['de'][:10],
                       'tx': t['tx'], 'estimulo': nome, 'ms': round(lista[0][1]), 'extra': ' + '.join(extras) or None,
-                      'replay': True, 'quando': t['quando']})
+                      'replay': True, 'quando': t['quando'], 'token': sent.nome if sent is not None else pool['nome']})
 
         # ----- teto por ordem e lote (relidos a cada volta; mudam sem reiniciar) -----
         aj = ajustes()
