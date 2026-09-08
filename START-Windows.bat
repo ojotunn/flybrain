@@ -12,8 +12,8 @@ set FLY_RELAY_URL=wss://flybrain-production.up.railway.app/fonte
 if exist relay.token set /p FLY_RELAY_TOKEN=<relay.token
 rem Mercado: modo real (carteira dela em mercado\carteira.json) ou papel. Em DOLAR: teto por ordem e lote (fracao do saldo).
 set FLY_MERCADO_MODO=real
-set FLY_MERCADO_MAX_ORDEM_USD=5
-set FLY_MERCADO_ORDEM=0.05
+set FLY_MERCADO_MAX_ORDEM_USD=10
+set FLY_MERCADO_ORDEM=0.10
 rem so no modo papel: saldo virtual inicial em ETH
 set FLY_MERCADO_SALDO_ETH=0.05
 echo ==== FLY - cerebro (porta 8435) + corpo 3D ====

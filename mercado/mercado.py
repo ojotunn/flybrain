@@ -101,6 +101,22 @@ def sentidos_config():
 
 ORDENS_ARQ = Path(__file__).resolve().parent / 'ordens.txt'     # 'on' | 'off': liga/desliga as ordens sem reiniciar
 ULTIMO_ARQ = Path(__file__).resolve().parent / 'ultimo_token.txt'   # token que ela opera (para retomar apos reinicio)
+AJUSTES_ARQ = Path(__file__).resolve().parent / 'ajustes.txt'       # max_ordem_usd=10  lote=0.10  (relido ao vivo)
+
+
+def ajustes():
+    """Teto por ordem (dolares) e lote (fracao do saldo) ajustaveis sem reiniciar: mercado/ajustes.txt."""
+    saida = {}
+    if AJUSTES_ARQ.exists():
+        for linha in AJUSTES_ARQ.read_text().splitlines():
+            linha = linha.split('#', 1)[0].strip()
+            if '=' in linha:
+                k, v = linha.split('=', 1)
+                try:
+                    saida[k.strip().lower()] = float(v.strip().replace(',', '.'))
+                except ValueError:
+                    pass
+    return saida
 
 
 def ordens_ativas():
@@ -402,7 +418,7 @@ class CarteiraReal:
 
 
 def main():
-    global SALDO0, MAX_ORDEM_ETH, ORDEM_MIN
+    global SALDO0, MAX_ORDEM_ETH, ORDEM_MIN, MAX_ORDEM_USD, ORDEM_FRACAO
     sys.stdout.reconfigure(errors='replace')   # nome de token com emoji nao pode derrubar o console cp1252
     estado = {'dn': {}, 'estimulos': [], 'ligado': False}
     threading.Thread(target=leitor_ws, args=(estado,), name='ws', daemon=True).start()
@@ -664,6 +680,17 @@ def main():
                       'tx': t['tx'], 'estimulo': nome, 'ms': round(lista[0][1]), 'extra': ' + '.join(extras) or None,
                       'replay': True, 'quando': t['quando']})
 
+        # ----- teto por ordem e lote (relidos a cada volta; mudam sem reiniciar) -----
+        aj = ajustes()
+        novo_max, novo_lote = aj.get('max_ordem_usd', MAX_ORDEM_USD), aj.get('lote', ORDEM_FRACAO)
+        if (novo_max, novo_lote) != (MAX_ORDEM_USD, ORDEM_FRACAO):
+            MAX_ORDEM_USD, ORDEM_FRACAO = novo_max, novo_lote
+            if eth_usd > 0:
+                MAX_ORDEM_ETH = MAX_ORDEM_USD / eth_usd
+            print(f'[mercado] ajuste: teto ${MAX_ORDEM_USD:.0f} por ordem, lote {ORDEM_FRACAO:.0%}', flush=True)
+            publicar({'classe': 'info', 'texto': f'her order size changed: {ORDEM_FRACAO:.0%} of her ETH, max ${MAX_ORDEM_USD:.0f} per order'})
+        elif eth_usd > 0 and MAX_ORDEM_USD > 0:
+            MAX_ORDEM_ETH = MAX_ORDEM_USD / eth_usd     # acompanha o preco do ETH
         # ----- interruptor das ordens (relido a cada volta; muda sem reiniciar) -----
         agora_ativas = ordens_ativas()
         if agora_ativas != ativas:
