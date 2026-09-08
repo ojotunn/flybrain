@@ -613,10 +613,13 @@ def main():
                     if chain_leitura is None:
                         import pons
                         chain_leitura = pons.Pons()
-                    sent = SentidosChain(chain_leitura, cfg)
+                    sent = SentidosChain(chain_leitura, cfg, eth_usd)
                     sent_cfg = cfg
                     historico.clear(); enderecos.clear(); replay_fila.clear(); precos_sent.clear()
-                    print(f'[mercado] sentidos: {sent.nome} direto da chain (curva {sent.curva})', flush=True)
+                    historico.extend(sent.historico)                 # trades recentes da chain: material do replay
+                    enderecos.update(t['de'] for t in sent.historico)
+                    print(f'[mercado] sentidos: {sent.nome} direto da chain (curva {sent.curva}); '
+                          f'{len(sent.historico)} trades recentes carregados para o replay', flush=True)
                     publicar({'classe': 'info', 'texto': f'she now feels every trade of {sent.nome}, straight from the chain'})
                 except Exception as e:
                     prox_sent_tentativa = agora + 30

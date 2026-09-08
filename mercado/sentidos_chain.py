@@ -19,8 +19,9 @@ SEL_SELL = _seletor('sell(uint256,uint256,address)')
 
 
 class SentidosChain:
-    def __init__(self, chain, token):
+    def __init__(self, chain, token, eth_usd=0.0):
         self.chain = chain
+        self.eth_usd0 = float(eth_usd)                  # para dar valor em dolar aos trades semeados
         lanc = chain.lancamento(token)
         if not lanc['exists']:
             raise RuntimeError('token nao e um lancamento da Pons V2')
@@ -43,6 +44,39 @@ class SentidosChain:
         self.erros_429 = 0
         self.pausa_ate = 0.0                            # depois de um 429 do RPC, respira antes de pedir de novo
         self._preco()
+        self._semear()
+
+    def _semear(self, blocos=36000):
+        """Carrega os trades da ultima ~1 h como historico (sem estimular): o replay nao fica vazio depois de
+        um reinicio (07/09 22:20, 'parece que esta tudo parado' = historico zerado pelo reinicio + token quieto)."""
+        w3 = self.chain.w3
+        try:
+            logs = w3.eth.get_logs({'address': self.curva, 'fromBlock': max(0, self.bloco - blocos), 'toBlock': self.bloco})
+        except Exception as e:
+            self.erro = 'semear: ' + str(e)[:60]
+            return
+        hashes = list(dict.fromkeys(Web3.to_hex(l['transactionHash']) for l in logs))[-120:]
+        for h, tx in zip(hashes, self._transacoes(hashes)):
+            self.vistos.add(h)
+            t = self._classificar(h, tx, self.eth_usd0)
+            if t:
+                self.historico.append(t)
+        self.semeados = len(self.historico)
+
+    def _classificar(self, h, tx, eth_usd):
+        if tx is None:
+            return None
+        dados = Web3.to_hex(tx['input']).lower()
+        sel = dados[:10]
+        quando = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+        if sel == SEL_BUY or int(tx['value']) > 0:
+            kind, eth = 'buy', int(tx['value']) / 1e18
+        elif sel == SEL_SELL and len(dados) >= 74:
+            kind, eth = 'sell', int(dados[10:74], 16) / 10 ** self.decimais * self.preco_eth
+        else:
+            return None
+        return {'tx': h, 'kind': kind, 'usd': float(eth * eth_usd), 'eth': float(eth), 'de': str(tx['from']),
+                'quando': quando, 'preco_usd': self.preco_eth * eth_usd, 'fonte': 'chain'}
 
     def _transacoes(self, hashes):
         """Busca as transacoes num unico pedido em lote (JSON-RPC batch): 1 chamada em vez de N.
@@ -93,19 +127,9 @@ class SentidosChain:
         novos = []
         for h, tx in zip(hashes, self._transacoes(hashes)):
             self.vistos.add(h)
-            if tx is None:
-                continue
-            dados = Web3.to_hex(tx['input']).lower()
-            sel = dados[:10]
-            quando = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-            if sel == SEL_BUY or int(tx['value']) > 0:
-                kind, usd = 'buy', int(tx['value']) / 1e18 * eth_usd
-            elif sel == SEL_SELL and len(dados) >= 74:
-                kind, usd = 'sell', int(dados[10:74], 16) / 10 ** self.decimais * self.preco_eth * eth_usd
-            else:
+            t = self._classificar(h, tx, eth_usd)
+            if t is None:
                 continue                                    # outra chamada na curva (aprovacao, admin): nao e trade
-            t = {'tx': h, 'kind': kind, 'usd': float(usd), 'de': str(tx['from']), 'quando': quando,
-                 'preco_usd': self.preco_eth * eth_usd, 'fonte': 'chain'}
             novos.append(t)
             self.historico.append(t)
             self.lidos += 1
