@@ -1,4 +1,2 @@
-# Token que ela SENTE (os trades dele viram os estimulos), lido direto da chain. Um endereco de token.
-# Vazio = ela sente o mesmo token que opera. No lancamento entra aqui o CA do token dela.
-# 07/09 (teste antes do lancamento): ROBIN
-0xb65b325f68c943bd9ea7e28b7e2514919f19d016
+# lancamento 2026-09-07 21:34: o token dela
+0x84b3fb8c00de5a8c72bcf7edbab7eb88cea0faf1

@@ -100,6 +100,7 @@ def sentidos_config():
 
 
 ORDENS_ARQ = Path(__file__).resolve().parent / 'ordens.txt'     # 'on' | 'off': liga/desliga as ordens sem reiniciar
+ULTIMO_ARQ = Path(__file__).resolve().parent / 'ultimo_token.txt'   # token que ela opera (para retomar apos reinicio)
 
 
 def ordens_ativas():
@@ -414,6 +415,16 @@ def main():
     calibrado = False                      # teto e minimo por ordem calculados em ETH na primeira leitura de preco
     eth_usd = 0.0
     pool = {'pool': POOL, 'nome': '?', 'par': '?', 'token': ''} if POOL else None
+    if MODO == 'real' and pool is None and ULTIMO_ARQ.exists():
+        # reinicio segurando tokens: continua no mesmo token em vez de abandonar a posicao
+        addr = ULTIMO_ARQ.read_text().strip()
+        if addr and addr.lower() not in ignorados() and carteira.usar_token(addr) and carteira.tokens_raw > 0:
+            try:
+                nome_tok = str(carteira.chain.erc20(carteira.token).functions.symbol().call())
+            except Exception:
+                nome_tok = addr[:8]
+            pool = {'pool': carteira.curva, 'nome': nome_tok, 'par': f'{nome_tok} / WETH', 'token': addr}
+            print(f'[mercado] retomando {nome_tok}: ela ainda tem {carteira.tokens:,.0f} tokens', flush=True)
     ultima_escolha = 0.0
     ultima_carteira = 0.0
     ultima_curva = 0.0
@@ -519,6 +530,10 @@ def main():
             if novo and (pool is None or novo['pool'] != pool['pool'] or not pool.get('token')):
                 pool = novo
                 vistos.clear()
+                try:
+                    ULTIMO_ARQ.write_text(pool.get('token', ''))     # para um reinicio nao abandonar a posicao
+                except Exception:
+                    pass
                 print(f'[mercado] token escolhido: {pool["nome"]} ({pool["par"]}) pool {pool["pool"]} token {pool.get("token")}', flush=True)
                 publicar({'classe': 'info', 'texto': f'watching {pool["nome"]} on Pons, the busiest curve right now'})
         if pool is not None and agora - ultima_leitura >= INTERVALO and proibido(pool):

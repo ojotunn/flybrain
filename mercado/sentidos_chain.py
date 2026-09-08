@@ -34,13 +34,33 @@ class SentidosChain:
             self.decimais = int(erc.functions.decimals().call())
         except Exception:
             self.decimais = 18
-        self.bloco = int(chain.w3.eth.block_number)     # comeca de agora: sem historico velho
+        self.bloco = int(chain.w3.eth.block_number) - 40   # comeca uns 4 s atras (reinicio nao perde trade)
         self.preco_eth = 0.0
         self.historico = deque(maxlen=600)
         self.vistos = set()
         self.erro = ''
         self.lidos = 0
+        self.erros_429 = 0
+        self.pausa_ate = 0.0                            # depois de um 429 do RPC, respira antes de pedir de novo
         self._preco()
+
+    def _transacoes(self, hashes):
+        """Busca as transacoes num unico pedido em lote (JSON-RPC batch): 1 chamada em vez de N.
+        Se o lote nao for suportado, cai no pedido um a um."""
+        w3 = self.chain.w3
+        try:
+            with w3.batch_requests() as lote:
+                for h in hashes:
+                    lote.add(w3.eth.get_transaction(h))
+                return list(lote.execute())
+        except Exception:
+            saida = []
+            for h in hashes:
+                try:
+                    saida.append(w3.eth.get_transaction(h))
+                except Exception:
+                    saida.append(None)
+            return saida
 
     def _preco(self):
         try:
@@ -52,6 +72,8 @@ class SentidosChain:
     def ler(self, eth_usd):
         """Trades novos desde a ultima leitura, no formato dos trades da GeckoTerminal (+ fonte='chain')."""
         w3 = self.chain.w3
+        if time.time() < self.pausa_ate:
+            return []
         try:
             atual = int(w3.eth.block_number)
             if atual <= self.bloco:
@@ -61,18 +83,17 @@ class SentidosChain:
             self.erro = ''
         except Exception as e:
             self.erro = str(e)[:80]
+            if '429' in self.erro:
+                self.erros_429 += 1
+                self.pausa_ate = time.time() + 12       # o cursor fica onde esta: nada se perde, so atrasa
             return []
-        hashes = list(dict.fromkeys(Web3.to_hex(l['transactionHash']) for l in logs))
+        hashes = [h for h in dict.fromkeys(Web3.to_hex(l['transactionHash']) for l in logs) if h not in self.vistos]
         if hashes:
             self._preco()
         novos = []
-        for h in hashes:
-            if h in self.vistos:
-                continue
+        for h, tx in zip(hashes, self._transacoes(hashes)):
             self.vistos.add(h)
-            try:
-                tx = w3.eth.get_transaction(h)
-            except Exception:
+            if tx is None:
                 continue
             dados = Web3.to_hex(tx['input']).lower()
             sel = dados[:10]

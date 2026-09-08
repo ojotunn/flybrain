@@ -1,4 +1,2 @@
-# Tokens que a mosca NUNCA opera: um endereco (token ou curva) por linha. Relido a cada escolha de token.
-# O token dela entra aqui na hora do lancamento.
-# 07/09 (teste antes do lancamento): ROBIN e o que ela sente, entao nao opera
-0xb65b325f68c943bd9ea7e28b7e2514919f19d016
+# lancamento 2026-09-07 21:34: ela nunca opera o proprio token
+0x84b3fb8c00de5a8c72bcf7edbab7eb88cea0faf1
