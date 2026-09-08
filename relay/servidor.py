@@ -107,8 +107,13 @@ async def fonte(request):
                 if m.get('tipo') == 'mercado':
                     if m.get('classe') == 'resumo':
                         app['estado']['resumo'] = msg.data
+                    elif m.get('classe') == 'limpar':
+                        app['estado']['eventos'].clear()
+                        app['estado']['ordens'].clear()
                     else:
                         app['estado']['eventos'].append(msg.data)
+                        if m.get('classe') == 'ordem':          # ordens dela guardadas a parte: nao se perdem no feed
+                            app['estado']['ordens'].append(msg.data)
                 espalhar(app, 't', msg.data)
     finally:
         contador.cancel()
@@ -124,6 +129,7 @@ async def fonte_limpar(request):
     if not TOKEN or request.query.get('token') != TOKEN:
         raise web.HTTPForbidden(text='token')
     app['estado']['eventos'].clear()
+    app['estado']['ordens'].clear()
     espalhar(app, 't', json.dumps({'tipo': 'mercado', 'classe': 'limpar', 't': time.time()}, separators=(',', ':')))
     return web.json_response({'ok': True})
 
@@ -145,6 +151,8 @@ async def ws_handler(request):
         e.enviar(('b', est['quadro'][1]))
     if est.get('resumo'):
         e.enviar(('t', est['resumo']))
+    for ev in list(est['ordens'])[-6:]:
+        e.enviar(('t', ev))
     for ev in list(est['eventos'])[-12:]:
         e.enviar(('t', ev))
     app['espectadores'].add(e)
@@ -167,6 +175,7 @@ async def api_estado(request):
 async def api_mercado(request):
     est = request.app['estado']
     return web.json_response({'resumo': json.loads(est['resumo']) if est.get('resumo') else None,
+                              'ordens': [json.loads(x) for x in list(est['ordens'])[-20:]],
                               'eventos': [json.loads(x) for x in list(est['eventos'])[-40:]]})
 
 
@@ -205,7 +214,7 @@ def main():
     app = web.Application()
     app['espectadores'] = set()
     app['estado'] = {'ola': None, 'quadro': None, 'corpo': None, 'resumo': None, 'eventos': deque(maxlen=200),
-                     'fonte': None, 'fonte_t': 0.0, 'config': None}
+                     'ordens': deque(maxlen=50), 'fonte': None, 'fonte_t': 0.0, 'config': None}
     app.router.add_get('/', index)
     app.router.add_get('/ws', ws_handler)
     app.router.add_get('/fonte', fonte)

@@ -352,6 +352,10 @@ class CarteiraReal:
         if self.token:
             self.tokens_raw = int(self.chain.saldo_token(self.token, self.endereco))
             self.tokens = self.tokens_raw / 10 ** self.decimais
+        try:   # contagem de ordens vem da chain (nonce), nao de um contador que zera a cada reinicio
+            self.ordens = int(self.chain.w3.eth.get_transaction_count(self.endereco))
+        except Exception:
+            pass
 
     def _apos_tx(self):
         antes = self.esperado
@@ -725,7 +729,7 @@ def main():
                     acima_desde.pop('compra', None)
                     publicar({'classe': 'ordem', 'lado': 'buy', 'eth': round(lote, 6), 'preco_eth': preco, 'modo': MODO,
                               'motivo': f'proboscis {dn.get("feed", 0):.0f} Hz for {dur:.1f}s after {ultimo_estimulo[0]}',
-                              'tokens': carteira.tokens, 'saldo_eth': carteira.eth, 'tx': carteira.ultima_tx})
+                              'tokens': carteira.tokens, 'saldo_eth': carteira.eth, 'tx': carteira.ultima_tx, 'token_ordem': pool['nome']})
                     print(f'[mercado] COMPRA {MODO} {lote:.5f} ETH @ {preco:.3e} ({dn.get("feed", 0):.0f} Hz por {dur:.1f}s) {carteira.ultima_tx}', flush=True)
                 elif MODO == 'real':
                     acima_desde.pop('compra', None)       # falhou (card de erro ja saiu); nao insiste no mesmo segundo
@@ -736,7 +740,7 @@ def main():
                 if recebido > 0:
                     publicar({'classe': 'ordem', 'lado': 'sell', 'eth': round(recebido, 6), 'preco_eth': preco, 'modo': MODO,
                               'motivo': f'bitter taste for {AMARGO_S:.0f}s after {ultimo_estimulo[0]} (bridge rule: sells {VENDA_AMARGO_FRACAO:.0%})',
-                              'tokens': carteira.tokens, 'saldo_eth': carteira.eth, 'tx': carteira.ultima_tx})
+                              'tokens': carteira.tokens, 'saldo_eth': carteira.eth, 'tx': carteira.ultima_tx, 'token_ordem': pool['nome']})
                     print(f'[mercado] VENDA {MODO} {VENDA_AMARGO_FRACAO:.0%} -> {recebido:.5f} ETH (amargo) {carteira.ultima_tx}', flush=True)
             for chave, rotulo in (('venda_fuga', 'escape'), ('venda_re', 'backing up')):
                 if chave in acima_desde and agora - acima_desde[chave] >= REGRAS[chave]['segundos'] and carteira.tokens > 0:
@@ -746,7 +750,7 @@ def main():
                     if recebido > 0:
                         publicar({'classe': 'ordem', 'lado': 'sell', 'eth': round(recebido, 6), 'preco_eth': preco, 'modo': MODO,
                                   'motivo': f'{rotulo} {dn.get(REGRAS[chave]["grupo"], 0):.0f} Hz after {ultimo_estimulo[0]}',
-                                  'tokens': carteira.tokens, 'saldo_eth': carteira.eth, 'tx': carteira.ultima_tx})
+                                  'tokens': carteira.tokens, 'saldo_eth': carteira.eth, 'tx': carteira.ultima_tx, 'token_ordem': pool['nome']})
                         print(f'[mercado] VENDA {MODO} -> {recebido:.5f} ETH ({rotulo}) {carteira.ultima_tx}', flush=True)
                     break
 
