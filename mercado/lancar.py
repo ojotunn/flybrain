@@ -8,6 +8,7 @@
 #   py\Scripts\python.exe mercado\lancar.py 0xCA_DO_TOKEN [https://x.com/...]
 #   py\Scripts\python.exe mercado\lancar.py --desligar        (so desliga as ordens de novo)
 import json
+import re
 import sys
 import time
 import urllib.request
@@ -37,12 +38,25 @@ def main():
     (AQUI / 'sentidos.txt').write_text(f'# lancamento {time.strftime("%Y-%m-%d %H:%M")}: o token dela\n{ca}\n')
     (AQUI / 'ignorar.txt').write_text(f'# lancamento {time.strftime("%Y-%m-%d %H:%M")}: ela nunca opera o proprio token\n{ca}\n')
     print('1-2. sentidos.txt e ignorar.txt =', ca)
+    try:   # contador de ordens do site comeca do zero neste lancamento: nonce atual da carteira dela vira a base
+        from web3 import Web3
+        end = '0x' + json.loads((AQUI / 'carteira.json').read_text())['address']
+        w3 = Web3(Web3.HTTPProvider('https://rpc.mainnet.chain.robinhood.com', request_kwargs={'timeout': 20}))
+        base = int(w3.eth.get_transaction_count(Web3.to_checksum_address(end)))
+        aj = (AQUI / 'ajustes.txt').read_text()
+        if 'nonce_base=' in aj:
+            aj = re.sub(r'^nonce_base=.*$', f'nonce_base={base}', aj, flags=re.M)
+        else:
+            aj = aj.rstrip('\n') + f'\nnonce_base={base}\n'
+        (AQUI / 'ajustes.txt').write_text(aj); print('     nonce_base =', base)
+    except Exception as e:
+        print('     nonce_base nao ajustado:', e)
     print('3.   pagina:', post('/api/config', {'ca': ca, 'x': x}))
     print('4.   feed limpo (PC):', post('/api/mercado/limpar', {}))
     # o relay guarda a propria lista de cards: limpa la tambem (token de relay.token) e as paginas abertas zeram
     try:
         token = (AQUI.parent / 'relay.token').read_text().strip()
-        req = urllib.request.Request(f'https://extremetrenchfly.com/fonte/limpar?token={token}', data=b'{}', method='POST',
+        req = urllib.request.Request(f'https://www.flybrain.finance/fonte/limpar?token={token}', data=b'{}', method='POST',
                                      headers={'Content-Type': 'application/json'})
         with urllib.request.urlopen(req, timeout=15) as r:
             print('     feed limpo (relay):', json.loads(r.read().decode('utf-8')))
