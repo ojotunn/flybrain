@@ -7,3 +7,4 @@ mercado/carteira.json
 mercado/carteira.senha
 *.log
 relay.token
+mercado/carteira-antiga/

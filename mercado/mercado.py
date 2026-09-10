@@ -353,7 +353,7 @@ class CarteiraReal:
             self.tokens_raw = int(self.chain.saldo_token(self.token, self.endereco))
             self.tokens = self.tokens_raw / 10 ** self.decimais
         try:   # contagem de ordens vem da chain (nonce), nao de um contador que zera a cada reinicio
-            self.ordens = int(self.chain.w3.eth.get_transaction_count(self.endereco))
+            self.ordens = max(0, int(self.chain.w3.eth.get_transaction_count(self.endereco)) - int(ajustes().get('nonce_base', 0)))   # nonce_base em ajustes.txt: o que veio antes deste lancamento nao conta
         except Exception:
             pass
 

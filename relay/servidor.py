@@ -197,8 +197,8 @@ async def index(request):
     """Pagina publica com o CA do token e o link do X vindos das variaveis do servico (FLY_CA, FLY_X_URL):
     mudar a variavel no Railway redeploya em um minuto, sem mexer em codigo."""
     host = (request.headers.get('Host') or '').split(':')[0].lower()
-    if host == 'flybrain.finance':      # raiz sem www: manda para o www, onde o PC esta conectado (07/09)
-        raise web.HTTPMovedPermanently('https://www.flybrain.finance/')
+    if host and not host.startswith('www.') and not host.endswith('.railway.app') and 'localhost' not in host and '.' in host:   # raiz sem www: manda para o www (vale para qualquer dominio proprio)
+        raise web.HTTPMovedPermanently(f'https://www.{host}/')
     html = (SITE / 'publico.html').read_text(encoding='utf-8')
     cfg = request.app['estado'].get('config') or {}
     ca = (cfg.get('ca') or os.environ.get('FLY_CA', '')).strip().replace("'", '')
